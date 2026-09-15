@@ -28,7 +28,7 @@ check "a new key is appended" '[ "$(tail -1 "$HOME/app/.env")" = APP_DEBUG=false
 check "untouched lines are kept verbatim" 'env_has "DB_PASSWORD=\"s3cr#t\"" && env_has APP_NAME=Example'
 check "the previous .env is backed up outside the app" '[ "$(backups)" = 1 ]'
 check "no value is printed" '! grep -q "https://example.test" "$root/out"'
-check ".env stays private" '[ "$(stat -f %Lp "$HOME/app/.env" 2>/dev/null || stat -c %a "$HOME/app/.env")" = 600 ]'
+check ".env stays private" '[ -n "$(find "$HOME/app/.env" -perm 600)" ]'
 
 # 2. Running again with the same values changes nothing and takes no backup.
 run app '' 'SET:APP_ENV=production' 'SET:APP_URL=https://example.test' 'SET:APP_DEBUG=false'; status=$?
