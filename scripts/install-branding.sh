@@ -29,8 +29,14 @@ esac
 app="$HOME/$app_dir"
 source="$HOME/$source_directory"
 public="$app/public"
-[ -d "$app" ] && [ ! -L "$app" ] || { echo "::error::Application directory is missing or aliased." >&2; exit 1; }
-[ -d "$public" ] && [ ! -L "$public" ] || { echo "::error::Application public directory is missing or aliased." >&2; exit 1; }
+if [ ! -d "$app" ] || [ -L "$app" ]; then
+    echo "::error::Application directory is missing or aliased." >&2
+    exit 1
+fi
+if [ ! -d "$public" ] || [ -L "$public" ]; then
+    echo "::error::Application public directory is missing or aliased." >&2
+    exit 1
+fi
 
 current=$HOME
 IFS=/ read -r -a source_components <<<"$source_directory"
@@ -38,7 +44,10 @@ for component in "${source_components[@]}"; do
     current="$current/$component"
     [ ! -L "$current" ] || { echo "::error::branding-source must not traverse a symlink." >&2; exit 1; }
 done
-[ -d "$source" ] && [ ! -L "$source" ] || { echo "::error::Private branding source is missing or aliased." >&2; exit 1; }
+if [ ! -d "$source" ] || [ -L "$source" ]; then
+    echo "::error::Private branding source is missing or aliased." >&2
+    exit 1
+fi
 
 files=()
 for file in "$@"; do
@@ -48,8 +57,10 @@ for file in "$@"; do
             exit 2 ;;
     esac
     candidate="$source/$file"
-    [ -f "$candidate" ] && [ ! -L "$candidate" ] && [ -s "$candidate" ] \
-        || { echo "::error::Required private branding file '$file' is missing, empty, or aliased." >&2; exit 1; }
+    if [ ! -f "$candidate" ] || [ -L "$candidate" ] || [ ! -s "$candidate" ]; then
+        echo "::error::Required private branding file '$file' is missing, empty, or aliased." >&2
+        exit 1
+    fi
     files+=("$file")
 done
 
@@ -67,7 +78,9 @@ for file in "${files[@]}"; do
 done
 
 for file in "${files[@]}"; do
-    [ -f "$destination/$file" ] && [ ! -L "$destination/$file" ] && [ -s "$destination/$file" ] \
-        || { echo "::error::Branding file '$file' was not installed correctly." >&2; exit 1; }
+    if [ ! -f "$destination/$file" ] || [ -L "$destination/$file" ] || [ ! -s "$destination/$file" ]; then
+        echo "::error::Branding file '$file' was not installed correctly." >&2
+        exit 1
+    fi
 done
 echo "Installed ${#files[@]} private branding file(s)."

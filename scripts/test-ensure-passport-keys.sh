@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Local harness for ensure-passport-keys.sh.
-# shellcheck disable=SC2016,SC2034,SC2329 # Checks are eval'd strings; functions and setup values are used there.
+# shellcheck disable=SC2016,SC2034,SC2317,SC2329 # Checks are eval'd strings; functions and setup values are used there.
 set -uo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 script="$here/ensure-passport-keys.sh"

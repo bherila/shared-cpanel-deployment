@@ -28,7 +28,10 @@ esac
 [ -x "$php" ] || { echo "::error::PHP binary is not executable on this host." >&2; exit 1; }
 
 app="$HOME/$app_dir"
-[ -d "$app" ] && [ ! -L "$app" ] || { echo "::error::~/$app_dir is missing or aliased." >&2; exit 1; }
+if [ ! -d "$app" ] || [ -L "$app" ]; then
+    echo "::error::~/$app_dir is missing or aliased." >&2
+    exit 1
+fi
 [ -f "$app/artisan" ] || { echo "::error::~/$app_dir has no artisan file." >&2; exit 1; }
 
 current=$app
