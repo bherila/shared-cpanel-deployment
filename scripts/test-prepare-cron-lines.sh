@@ -37,6 +37,15 @@ output=$(bash "$script" app "$PHP" 1G /dev/null '' "$explicit")
 expected_with_explicit=$(printf '%s\n%s' "$expected" "$explicit")
 check "an explicit worker limit is preserved" test "$output" = "$expected_with_explicit"
 
+other_option='* * * * * cd "$HOME/app" && /opt/cpanel/ea-php85/root/usr/bin/php -d opcache.enable_cli=1 artisan queue:work # JOB:app-worker'
+output=$(bash "$script" app "$PHP" 1G /dev/null "$other_option" '')
+expected_other_option='* * * * * cd "$HOME/app" && /opt/cpanel/ea-php85/root/usr/bin/php -d memory_limit=1G -d opcache.enable_cli=1 artisan queue:work # JOB:app-worker'
+check "other PHP options are preserved when memory is added" test "$output" = "$expected_other_option"
+
+two_options='* * * * * cd "$HOME/app" && /opt/cpanel/ea-php85/root/usr/bin/php -d opcache.enable_cli=1 -d memory_limit=768M artisan queue:work # JOB:app-worker'
+output=$(bash "$script" app "$PHP" 1G /dev/null "$two_options" '')
+check "an explicit limit after another PHP option is preserved" test "$output" = "$two_options"
+
 non_artisan='0 * * * * cd "$HOME/app" && ./scripts/rotate.sh # JOB:app-rotate'
 output=$(bash "$script" app "$PHP" 1G /dev/null "$non_artisan" '')
 check "non-Artisan managed commands are unchanged" test "$output" = "$non_artisan"

@@ -49,26 +49,33 @@ fi
 
 normalize_artisan_memory() {
     local line=$1
-    local plain="$php artisan "
-    local configured="$php -d memory_limit="
-    local replacement="$php -d memory_limit=$memory_limit artisan "
+    local after_php
+    local php_options
+    local replacement="$php -d memory_limit=$memory_limit "
 
     if [[ $line != *' artisan '* ]]; then
         printf '%s\n' "$line"
         return
     fi
 
-    if [[ $line == *"$configured"*' artisan '* ]]; then
-        printf '%s\n' "$line"
-        return
+    if [[ $line == *"$php "* ]]; then
+        after_php=${line#*"$php "}
+        if [[ $after_php == artisan\ * || $after_php == *' artisan '* ]]; then
+            if [[ $after_php == artisan\ * ]]; then
+                php_options=''
+            else
+                php_options=${after_php%% artisan *}
+            fi
+            if [[ " $php_options " == *' -d memory_limit='* ]]; then
+                printf '%s\n' "$line"
+            else
+                printf '%s\n' "${line/"$php "/$replacement}"
+            fi
+            return
+        fi
     fi
 
-    if [[ $line == *"$plain"* ]]; then
-        printf '%s\n' "${line/"$plain"/$replacement}"
-        return
-    fi
-
-    echo "Managed Artisan cron lines must invoke '$php artisan' or set '$php -d memory_limit=<value> artisan'." >&2
+    echo "Managed Artisan cron lines must invoke the configured PHP binary before 'artisan'." >&2
     echo "Refused line: $line" >&2
     exit 2
 }
