@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Local harness for rsync-deploy.sh: fake `ssh` and `rsync` on PATH that record what they were asked.
 # Usage: test-rsync-deploy.sh [scratch-root]   (defaults to mktemp; pass a directory that allows exec)
-# shellcheck disable=SC2016,SC2034,SC2329 # Checks are eval'd strings; what they read looks unused.
+# shellcheck disable=SC2016,SC2034,SC2317,SC2329 # Checks are eval'd strings; what they call looks unused (SC2317 on older shellcheck).
 set -uo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 script="$here/rsync-deploy.sh"

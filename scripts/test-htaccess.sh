@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Local harness for htaccess.sh.
 # Usage: test-htaccess.sh
-# shellcheck disable=SC2016,SC2034,SC2329 # Checks are eval'd strings; what they read looks unused.
+# shellcheck disable=SC2016,SC2034,SC2317,SC2329 # Checks are eval'd strings; what they call looks unused (SC2317 on older shellcheck).
 set -uo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 script="$here/htaccess.sh"
