@@ -27,10 +27,10 @@ case $version in
     [0-9].[0-9] | [0-9].[0-9][0-9]) ;;
     *) echo "::error::PHP version must be major.minor, not '$version'." >&2; exit 2 ;;
 esac
-case $memory in
-    '' | -1 | [1-9]*[0-9][GgMmKk] | [1-9][GgMmKk] | [1-9]*[0-9]) ;;
-    *) echo "::error::web-memory-limit '$memory' is not a php.ini size." >&2; exit 2 ;;
-esac
+if [[ ! $memory =~ ^(-1|[1-9][0-9]*[KMGkmg]?)?$ ]]; then
+    echo "::error::web-memory-limit '$memory' is not a php.ini size." >&2
+    exit 2
+fi
 
 if [ ! -f "$file" ]; then
     echo "::error::$file does not exist; a Laravel checkout ships one." >&2
