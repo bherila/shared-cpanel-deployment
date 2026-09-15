@@ -42,7 +42,8 @@ That is a complete deploy. With the defaults it:
    unless the file already sets them;
 3. uploads with a **guarded** `rsync --delete` (below), keeping `.env` and runtime storage;
 4. checks `.env` has non-empty `APP_KEY`, `APP_ENV` and `APP_URL`;
-5. runs `config:clear`, `migrate --force`, `config:cache`;
+5. runs `config:clear`, `migrate --force`, verifies no migration remains pending, then runs
+   `config:cache`;
 6. installs `* * * * * cd "$HOME/example-laravel" && …php -d memory_limit=1G artisan schedule:run … # JOB:example-laravel-scheduler`
    in the account crontab, **replacing only this application's lines**;
 7. fails unless `https://example.bherila.net/up` answers, and unless the vhost really serves PHP 8.5 with
@@ -75,7 +76,7 @@ Pin the action to a full commit SHA. The job holds a key that reaches every appl
 | `env-values` | — | `KEY=value` lines to set. **Not for secrets**: use `env-source`. |
 | `required-env-keys` | `APP_KEY` `APP_ENV` `APP_URL` | The deploy stops before migrating if any is missing or empty. |
 | **Artisan** | | |
-| `run-migrations` | `true` | `migrate --force`. |
+| `run-migrations` | `true` | `migrate --force`, followed by an assertion that none remain pending. |
 | `artisan-commands` | — | Extra invocations after `config:cache`, e.g. `view:clear`. |
 | `pre-migrate-script` | — | A script in your checkout, run on the host after upload and `.env`, before artisan. Gets `<deploy-dir> <php>`. |
 | `post-deploy-script` | — | Same, after artisan and cron. |
@@ -151,6 +152,7 @@ bash scripts/test-install-cron.sh
 bash scripts/test-rsync-deploy.sh
 bash scripts/test-htaccess.sh
 bash scripts/test-configure-env.sh
+bash scripts/test-assert-no-pending-migrations.sh
 ```
 
 Release by tagging `vX.Y.Z`; callers pin the tag's commit SHA.
