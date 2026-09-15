@@ -88,10 +88,10 @@ Pin the action to a full commit SHA. The job holds a key that reaches every appl
 | `post-deploy-script` | — | Same, after artisan and cron. |
 | **Cron** | | |
 | `install-cron` | `true` | |
-| `cron-memory-limit` | `1G` | The cPanel CLI default is 128M. |
+| `cron-memory-limit` | `1G` | Applied to every managed Artisan scheduler and worker line that does not set an explicit limit. The cPanel CLI default is 128M. |
 | `scheduler-log` | `/dev/null` | Or a path inside the application, e.g. `storage/logs/scheduler.log` (appended). |
-| `cron-lines` | the scheduler line | Replaces the default. Each must `cd "$HOME/<deploy-dir>"` and end in `# JOB:<id>`. |
-| `extra-cron-lines` | — | Added alongside the scheduler line, same rules. |
+| `cron-lines` | the scheduler line | Replaces the default. Each must `cd "$HOME/<deploy-dir>"` and end in `# JOB:<id>`. Artisan lines inherit `cron-memory-limit`. |
+| `extra-cron-lines` | — | Added alongside the scheduler line, same rules. Use this for queue workers; they inherit `cron-memory-limit` too. |
 | **Verification** | | |
 | `health-path` | `/up` | Empty skips. |
 | `verify-web-php` | `true` | |
@@ -192,6 +192,7 @@ such as `.config/identity/branding`; keep the canonical files there rather than 
 ```sh
 shellcheck scripts/*.sh
 bash scripts/test-install-cron.sh
+bash scripts/test-prepare-cron-lines.sh
 bash scripts/test-rsync-deploy.sh
 bash scripts/test-rsync-migrations.sh
 bash scripts/test-htaccess.sh
