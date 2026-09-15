@@ -37,6 +37,9 @@ jobs:
       - name: assert-no-pending-migrations.sh harness
         run: bash scripts/test-assert-no-pending-migrations.sh
 
+      - name: remote-artisan.sh harness
+        run: bash scripts/test-remote-artisan.sh
+
       - name: ensure-passport-keys.sh harness
         run: bash scripts/test-ensure-passport-keys.sh
 

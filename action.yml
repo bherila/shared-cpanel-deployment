@@ -155,6 +155,10 @@ inputs:
     description: Newline-separated extra artisan invocations, run after config:cache (e.g. view:clear).
     required: false
     default: ''
+  artisan-memory-limit:
+    description: Optional PHP CLI memory_limit applied to migrations and every Artisan command, e.g. 1G.
+    required: false
+    default: ''
   pre-migrate-script:
     description: >-
       Optional script in the checkout, run on the host after .env and before migration. With
@@ -219,6 +223,7 @@ runs:
         PHP_BINARY_INPUT: ${{ inputs.php-binary }}
         MIGRATION_ORDER: ${{ inputs.migration-order }}
         RUN_MIGRATIONS: ${{ inputs.run-migrations }}
+        ARTISAN_MEMORY_LIMIT: ${{ inputs.artisan-memory-limit }}
         FLAGS: >-
           keep-runtime-storage=${{ inputs.keep-runtime-storage }}
           set-php-handler=${{ inputs.set-php-handler }}
@@ -248,6 +253,10 @@ runs:
         esac
         if [ "$MIGRATION_ORDER" = before-upload ] && [ "$RUN_MIGRATIONS" != true ]; then
           echo "::error::migration-order 'before-upload' requires run-migrations: true." >&2
+          exit 2
+        fi
+        if [[ ! $ARTISAN_MEMORY_LIMIT =~ ^([1-9][0-9]*[KMGkmg]|-1)?$ ]]; then
+          echo "::error::artisan-memory-limit must be empty, -1, or a positive K/M/G value such as 1G." >&2
           exit 2
         fi
         echo "php=$php" >>"$GITHUB_OUTPUT"
@@ -353,9 +362,10 @@ runs:
         TARGET: ${{ steps.ssh.outputs.target }}
         DEPLOY_DIR: ${{ inputs.deploy-dir }}
         PHP_BINARY: ${{ steps.resolve.outputs.php }}
+        ARTISAN_MEMORY_LIMIT: ${{ inputs.artisan-memory-limit }}
       run: |
         set -euo pipefail
-        ssh "$TARGET" "bash -s -- $(printf '%q ' "$DEPLOY_DIR" "$PHP_BINARY" 'config:clear' 'migrate --force')" \
+        ssh "$TARGET" "bash -s -- $(printf '%q ' "$DEPLOY_DIR" "$PHP_BINARY" "$ARTISAN_MEMORY_LIMIT" 'config:clear' 'migrate --force')" \
           <"$GITHUB_ACTION_PATH/scripts/remote-artisan.sh"
 
     - name: Verify migrations completed before application upload
@@ -365,9 +375,10 @@ runs:
         TARGET: ${{ steps.ssh.outputs.target }}
         DEPLOY_DIR: ${{ inputs.deploy-dir }}
         PHP_BINARY: ${{ steps.resolve.outputs.php }}
+        ARTISAN_MEMORY_LIMIT: ${{ inputs.artisan-memory-limit }}
       run: |
         set -euo pipefail
-        ssh "$TARGET" "bash -s -- $(printf '%q ' "$DEPLOY_DIR" "$PHP_BINARY")" \
+        ssh "$TARGET" "bash -s -- $(printf '%q ' "$DEPLOY_DIR" "$PHP_BINARY" "$ARTISAN_MEMORY_LIMIT")" \
           <"$GITHUB_ACTION_PATH/scripts/assert-no-pending-migrations.sh"
 
     - name: Upload with guarded rsync
@@ -485,13 +496,14 @@ runs:
         PHP_BINARY: ${{ steps.resolve.outputs.php }}
         RUN_MIGRATIONS: ${{ inputs.run-migrations }}
         MIGRATION_ORDER: ${{ inputs.migration-order }}
+        ARTISAN_MEMORY_LIMIT: ${{ inputs.artisan-memory-limit }}
       run: |
         set -euo pipefail
         commands=(config:clear)
         if [ "$RUN_MIGRATIONS" = true ] && [ "$MIGRATION_ORDER" = after-upload ]; then
           commands+=("migrate --force")
         fi
-        ssh "$TARGET" "bash -s -- $(printf '%q ' "$DEPLOY_DIR" "$PHP_BINARY" "${commands[@]}")" \
+        ssh "$TARGET" "bash -s -- $(printf '%q ' "$DEPLOY_DIR" "$PHP_BINARY" "$ARTISAN_MEMORY_LIMIT" "${commands[@]}")" \
           <"$GITHUB_ACTION_PATH/scripts/remote-artisan.sh"
 
     - name: Verify migrations completed
@@ -501,9 +513,10 @@ runs:
         TARGET: ${{ steps.ssh.outputs.target }}
         DEPLOY_DIR: ${{ inputs.deploy-dir }}
         PHP_BINARY: ${{ steps.resolve.outputs.php }}
+        ARTISAN_MEMORY_LIMIT: ${{ inputs.artisan-memory-limit }}
       run: |
         set -euo pipefail
-        ssh "$TARGET" "bash -s -- $(printf '%q ' "$DEPLOY_DIR" "$PHP_BINARY")" \
+        ssh "$TARGET" "bash -s -- $(printf '%q ' "$DEPLOY_DIR" "$PHP_BINARY" "$ARTISAN_MEMORY_LIMIT")" \
           <"$GITHUB_ACTION_PATH/scripts/assert-no-pending-migrations.sh"
 
     - name: Cache config and run extra Artisan commands
@@ -513,6 +526,7 @@ runs:
         DEPLOY_DIR: ${{ inputs.deploy-dir }}
         PHP_BINARY: ${{ steps.resolve.outputs.php }}
         EXTRA_COMMANDS: ${{ inputs.artisan-commands }}
+        ARTISAN_MEMORY_LIMIT: ${{ inputs.artisan-memory-limit }}
       run: |
         set -euo pipefail
         commands=(config:cache)
@@ -520,7 +534,7 @@ runs:
           [ -z "${line//[[:space:]]/}" ] && continue
           commands+=("$line")
         done <<<"$EXTRA_COMMANDS"
-        ssh "$TARGET" "bash -s -- $(printf '%q ' "$DEPLOY_DIR" "$PHP_BINARY" "${commands[@]}")" \
+        ssh "$TARGET" "bash -s -- $(printf '%q ' "$DEPLOY_DIR" "$PHP_BINARY" "$ARTISAN_MEMORY_LIMIT" "${commands[@]}")" \
           <"$GITHUB_ACTION_PATH/scripts/remote-artisan.sh"
 
     - name: Install this application's cron lines

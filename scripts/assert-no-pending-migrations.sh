@@ -4,16 +4,17 @@
 #
 # Runs ON THE HOST after `artisan migrate --force`:
 #
-#   bash -s -- <app-dir> <php> < scripts/assert-no-pending-migrations.sh
+#   bash -s -- <app-dir> <php> <memory-limit> < scripts/assert-no-pending-migrations.sh
 set -euo pipefail
 
-if [ "$#" -ne 2 ]; then
-    echo "usage: assert-no-pending-migrations.sh <app-dir> <php>" >&2
+if [ "$#" -ne 3 ]; then
+    echo "usage: assert-no-pending-migrations.sh <app-dir> <php> <memory-limit>" >&2
     exit 2
 fi
 
 app_dir=$1
 php=$2
+memory_limit=$3
 deploy_home=${DEPLOY_HOME:-$HOME}
 
 case $app_dir in
@@ -28,6 +29,10 @@ case $php in
         echo "::error::PHP binary must be an absolute path, not '$php'." >&2
         exit 2 ;;
 esac
+if [[ ! $memory_limit =~ ^([1-9][0-9]*[KMGkmg]|-1)?$ ]]; then
+    echo "::error::PHP memory limit must be empty, -1, or a positive K/M/G value." >&2
+    exit 2
+fi
 
 if [ ! -x "$php" ]; then
     echo "::error::PHP binary '$php' is not executable on this host." >&2
@@ -41,7 +46,12 @@ if [ ! -f artisan ]; then
     exit 1
 fi
 
-if ! status=$("$php" artisan migrate:status --pending --no-ansi 2>&1); then
+if [ -n "$memory_limit" ]; then
+    status=$("$php" -d "memory_limit=$memory_limit" artisan migrate:status --pending --no-ansi 2>&1) || result=$?
+else
+    status=$("$php" artisan migrate:status --pending --no-ansi 2>&1) || result=$?
+fi
+if [ "${result:-0}" -ne 0 ]; then
     printf '%s\n' "$status" >&2
     echo "::error::Could not read migration status after migrate completed." >&2
     exit 1
