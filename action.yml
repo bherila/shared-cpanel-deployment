@@ -1,0 +1,399 @@
+name: Deploy Laravel to cPanel
+description: >-
+  Deploy a Laravel application to its own directory on a shared cPanel account: pinned SSH, the site's
+  PHP handler, a guarded rsync --delete, .env checks, migrations and config cache, the account crontab,
+  and post-deploy health and PHP checks. Every step that touches shared state is scoped to this
+  application's directory, its crontab lines, and its .env.
+author: bherila
+
+branding:
+  icon: upload-cloud
+  color: blue
+
+inputs:
+  # ── Connection ───────────────────────────────────────────────────────────────
+  ssh-host:
+    description: The cPanel host name.
+    required: true
+  ssh-username:
+    description: The cPanel account user.
+    required: true
+  ssh-private-key:
+    description: Deploy private key (pass a secret).
+    required: true
+  ssh-known-hosts:
+    description: Pinned known_hosts lines for the host. Host keys are never trusted on first use.
+    required: true
+  ssh-alias:
+    description: SSH alias written for this deploy; also returned as the ssh-target output.
+    required: false
+    default: cpanel-deploy
+
+  # ── Application ──────────────────────────────────────────────────────────────
+  deploy-dir:
+    description: The application's directory under the account home, e.g. uc-laravel. Never a webroot.
+    required: true
+  site-url:
+    description: The site's public https URL, used for the health and PHP checks.
+    required: true
+  php-version:
+    description: PHP major.minor for the web handler and the CLI, e.g. 8.5.
+    required: false
+    default: '8.5'
+  php-binary:
+    description: PHP CLI on the host. Defaults to cPanel's ea-php binary for php-version.
+    required: false
+    default: ''
+
+  # ── Build upload ─────────────────────────────────────────────────────────────
+  paths:
+    description: Newline-separated paths to upload, relative to the checkout.
+    required: false
+    default: |
+      app
+      bootstrap
+      config
+      database
+      public
+      resources
+      routes
+      storage
+      vendor
+      artisan
+      composer.json
+      composer.lock
+  excludes:
+    description: Newline-separated extra rsync exclude patterns, e.g. application data directories.
+    required: false
+    default: ''
+  keep-runtime-storage:
+    description: Keep storage/app, storage/logs and the framework cache, session and view directories.
+    required: false
+    default: 'true'
+  set-php-handler:
+    description: Write cPanel's handler for php-version into public/.htaccess before upload, unless one is already there.
+    required: false
+    default: 'true'
+  web-memory-limit:
+    description: php_value memory_limit for the LiteSpeed web handler (empty to leave alone). Also the minimum the PHP check enforces.
+    required: false
+    default: 1024M
+  webroot-symlink:
+    description: >-
+      Optional account-home name (e.g. ucadmin.example.com) that must be a symlink to <deploy-dir>/public.
+      A symlink is created or repointed; a real file or directory there fails the deploy and is never removed.
+    required: false
+    default: ''
+
+  # ── .env ─────────────────────────────────────────────────────────────────────
+  env-source:
+    description: Optional file under the account home installed as .env (mode 600) on every deploy, e.g. .config/svc/deployment.env.
+    required: false
+    default: ''
+  app-env:
+    description: Set APP_ENV in .env (empty leaves it as is).
+    required: false
+    default: ''
+  app-url:
+    description: Set APP_URL in .env (empty leaves it as is).
+    required: false
+    default: ''
+  app-debug:
+    description: Set APP_DEBUG in .env to true or false (empty leaves it as is).
+    required: false
+    default: ''
+  env-values:
+    description: Newline-separated KEY=value pairs to set in .env. Not for secrets; use env-source for those.
+    required: false
+    default: ''
+  required-env-keys:
+    description: Newline-separated keys that must be present and non-empty in .env, or the deploy fails before migrating.
+    required: false
+    default: |
+      APP_KEY
+      APP_ENV
+      APP_URL
+
+  # ── Artisan ──────────────────────────────────────────────────────────────────
+  run-migrations:
+    description: Run `artisan migrate --force` after config:clear.
+    required: false
+    default: 'true'
+  artisan-commands:
+    description: Newline-separated extra artisan invocations, run after config:cache (e.g. view:clear).
+    required: false
+    default: ''
+  pre-migrate-script:
+    description: Optional script in the checkout, run on the host after upload and .env, before artisan. Receives <deploy-dir> <php>.
+    required: false
+    default: ''
+  post-deploy-script:
+    description: Optional script in the checkout, run on the host after artisan and cron. Receives <deploy-dir> <php>.
+    required: false
+    default: ''
+
+  # ── Cron ─────────────────────────────────────────────────────────────────────
+  install-cron:
+    description: Install this application's cron lines in the account crontab.
+    required: false
+    default: 'true'
+  cron-memory-limit:
+    description: memory_limit for the default scheduler line (the CLI default on cPanel is 128M).
+    required: false
+    default: 1G
+  scheduler-log:
+    description: Where the scheduler line writes, relative to the application directory (e.g. storage/logs/scheduler.log), or /dev/null.
+    required: false
+    default: /dev/null
+  cron-lines:
+    description: >-
+      Newline-separated cron lines replacing the default scheduler line. Each must run from
+      cd "$HOME/<deploy-dir>" and end in # JOB:<id>.
+    required: false
+    default: ''
+  extra-cron-lines:
+    description: Newline-separated cron lines installed in addition to the scheduler line, same rules.
+    required: false
+    default: ''
+
+  # ── Verification ─────────────────────────────────────────────────────────────
+  health-path:
+    description: Health path checked on site-url (empty skips).
+    required: false
+    default: /up
+  verify-web-php:
+    description: Fail unless the vhost serves php-version with at least web-memory-limit.
+    required: false
+    default: 'true'
+
+outputs:
+  ssh-target:
+    description: The SSH alias, for workflow steps that run their own commands on the host.
+    value: ${{ steps.ssh.outputs.target }}
+  php-binary:
+    description: The PHP CLI path used on the host.
+    value: ${{ steps.resolve.outputs.php }}
+
+runs:
+  using: composite
+  steps:
+    - id: resolve
+      name: Resolve and validate inputs
+      shell: bash
+      env:
+        PHP_VERSION_INPUT: ${{ inputs.php-version }}
+        PHP_BINARY_INPUT: ${{ inputs.php-binary }}
+        FLAGS: >-
+          keep-runtime-storage=${{ inputs.keep-runtime-storage }}
+          set-php-handler=${{ inputs.set-php-handler }}
+          run-migrations=${{ inputs.run-migrations }}
+          install-cron=${{ inputs.install-cron }}
+          verify-web-php=${{ inputs.verify-web-php }}
+      run: |
+        set -euo pipefail
+        for flag in $FLAGS; do
+          case ${flag#*=} in
+            true | false) ;;
+            *) echo "::error::${flag%%=*} must be 'true' or 'false', not '${flag#*=}'." >&2; exit 2 ;;
+          esac
+        done
+        case $PHP_VERSION_INPUT in
+          [0-9].[0-9] | [0-9].[0-9][0-9]) ;;
+          *) echo "::error::php-version must be major.minor, e.g. 8.5, not '$PHP_VERSION_INPUT'." >&2; exit 2 ;;
+        esac
+        php=${PHP_BINARY_INPUT:-/opt/cpanel/ea-php${PHP_VERSION_INPUT//./}/root/usr/bin/php}
+        case $php in
+          /*) ;;
+          *) echo "::error::php-binary must be an absolute path, not '$php'." >&2; exit 2 ;;
+        esac
+        echo "php=$php" >>"$GITHUB_OUTPUT"
+
+    - id: ssh
+      name: Configure SSH
+      shell: bash
+      env:
+        SSH_ALIAS: ${{ inputs.ssh-alias }}
+        SSH_HOST_NAME: ${{ inputs.ssh-host }}
+        SSH_USER_NAME: ${{ inputs.ssh-username }}
+        SSH_PRIVATE_KEY: ${{ inputs.ssh-private-key }}
+        SSH_KNOWN_HOSTS: ${{ inputs.ssh-known-hosts }}
+      run: bash "$GITHUB_ACTION_PATH/scripts/configure-ssh.sh"
+
+    - name: Set the web PHP handler in public/.htaccess
+      shell: bash
+      env:
+        HTACCESS_FILE: public/.htaccess
+        PHP_VERSION_WANTED: ${{ inputs.php-version }}
+        SET_HANDLER: ${{ inputs.set-php-handler }}
+        WEB_MEMORY_LIMIT: ${{ inputs.web-memory-limit }}
+      run: bash "$GITHUB_ACTION_PATH/scripts/htaccess.sh"
+
+    - name: Upload with guarded rsync
+      shell: bash
+      env:
+        DEPLOY_TARGET: ${{ steps.ssh.outputs.target }}
+        DEPLOY_DIR: ${{ inputs.deploy-dir }}
+        DEPLOY_PATHS: ${{ inputs.paths }}
+        DEPLOY_EXCLUDES: ${{ inputs.excludes }}
+        DEPLOY_KEEP_RUNTIME_STORAGE: ${{ inputs.keep-runtime-storage }}
+      run: bash "$GITHUB_ACTION_PATH/scripts/rsync-deploy.sh"
+
+    - name: Ensure the webroot symlink
+      if: inputs.webroot-symlink != ''
+      shell: bash
+      env:
+        TARGET: ${{ steps.ssh.outputs.target }}
+        DEPLOY_DIR: ${{ inputs.deploy-dir }}
+        LINK_NAME: ${{ inputs.webroot-symlink }}
+      run: |
+        set -euo pipefail
+        ssh "$TARGET" "bash -s -- $(printf '%q ' "$DEPLOY_DIR" "$LINK_NAME")" \
+          <"$GITHUB_ACTION_PATH/scripts/ensure-webroot-symlink.sh"
+
+    - name: Install and check .env
+      shell: bash
+      env:
+        TARGET: ${{ steps.ssh.outputs.target }}
+        DEPLOY_DIR: ${{ inputs.deploy-dir }}
+        ENV_SOURCE: ${{ inputs.env-source }}
+        APP_ENV_VALUE: ${{ inputs.app-env }}
+        APP_URL_VALUE: ${{ inputs.app-url }}
+        APP_DEBUG_VALUE: ${{ inputs.app-debug }}
+        ENV_VALUES: ${{ inputs.env-values }}
+        REQUIRED_KEYS: ${{ inputs.required-env-keys }}
+      run: |
+        set -euo pipefail
+        ops=()
+        [ -n "$APP_ENV_VALUE" ] && ops+=("SET:APP_ENV=$APP_ENV_VALUE")
+        [ -n "$APP_URL_VALUE" ] && ops+=("SET:APP_URL=$APP_URL_VALUE")
+        if [ -n "$APP_DEBUG_VALUE" ]; then
+          case $APP_DEBUG_VALUE in
+            true | false) ops+=("SET:APP_DEBUG=$APP_DEBUG_VALUE") ;;
+            *) echo "::error::app-debug must be 'true', 'false' or empty." >&2; exit 2 ;;
+          esac
+        fi
+        while IFS= read -r line || [ -n "$line" ]; do
+          [ -z "${line//[[:space:]]/}" ] && continue
+          ops+=("SET:$line")
+        done <<<"$ENV_VALUES"
+        while IFS= read -r key || [ -n "$key" ]; do
+          key=${key//[[:space:]]/}
+          [ -z "$key" ] && continue
+          ops+=("REQUIRE:$key")
+        done <<<"$REQUIRED_KEYS"
+        ssh "$TARGET" "bash -s -- $(printf '%q ' "$DEPLOY_DIR" "$ENV_SOURCE" ${ops[@]+"${ops[@]}"})" \
+          <"$GITHUB_ACTION_PATH/scripts/configure-env.sh"
+
+    - name: Run the pre-migrate script
+      if: inputs.pre-migrate-script != ''
+      shell: bash
+      env:
+        TARGET: ${{ steps.ssh.outputs.target }}
+        DEPLOY_DIR: ${{ inputs.deploy-dir }}
+        PHP_BINARY: ${{ steps.resolve.outputs.php }}
+        SCRIPT: ${{ inputs.pre-migrate-script }}
+      run: |
+        set -euo pipefail
+        [ -f "$SCRIPT" ] || { echo "::error::pre-migrate-script '$SCRIPT' does not exist in the checkout." >&2; exit 2; }
+        ssh "$TARGET" "bash -s -- $(printf '%q ' "$DEPLOY_DIR" "$PHP_BINARY")" <"$SCRIPT"
+
+    - name: Clear config, migrate, and cache config
+      shell: bash
+      env:
+        TARGET: ${{ steps.ssh.outputs.target }}
+        DEPLOY_DIR: ${{ inputs.deploy-dir }}
+        PHP_BINARY: ${{ steps.resolve.outputs.php }}
+        RUN_MIGRATIONS: ${{ inputs.run-migrations }}
+        EXTRA_COMMANDS: ${{ inputs.artisan-commands }}
+      run: |
+        set -euo pipefail
+        commands=(config:clear)
+        [ "$RUN_MIGRATIONS" = true ] && commands+=("migrate --force")
+        commands+=(config:cache)
+        while IFS= read -r line || [ -n "$line" ]; do
+          [ -z "${line//[[:space:]]/}" ] && continue
+          commands+=("$line")
+        done <<<"$EXTRA_COMMANDS"
+        ssh "$TARGET" "bash -s -- $(printf '%q ' "$DEPLOY_DIR" "$PHP_BINARY" "${commands[@]}")" \
+          <"$GITHUB_ACTION_PATH/scripts/remote-artisan.sh"
+
+    - name: Install this application's cron lines
+      if: inputs.install-cron == 'true'
+      shell: bash
+      env:
+        TARGET: ${{ steps.ssh.outputs.target }}
+        DEPLOY_DIR: ${{ inputs.deploy-dir }}
+        PHP_BINARY: ${{ steps.resolve.outputs.php }}
+        CRON_MEMORY: ${{ inputs.cron-memory-limit }}
+        SCHEDULER_LOG: ${{ inputs.scheduler-log }}
+        CRON_LINES: ${{ inputs.cron-lines }}
+        EXTRA_CRON_LINES: ${{ inputs.extra-cron-lines }}
+      run: |
+        set -euo pipefail
+        trim() { local v=$1; v=${v#"${v%%[![:space:]]*}"}; printf '%s' "${v%"${v##*[![:space:]]}"}"; }
+        case $CRON_MEMORY in
+          [1-9]*[0-9][GgMm] | [1-9][GgMm]) ;;
+          *) echo "::error::cron-memory-limit must look like 1G or 512M, not '$CRON_MEMORY'." >&2; exit 2 ;;
+        esac
+        if [ "$SCHEDULER_LOG" = /dev/null ]; then
+          redirect='> /dev/null 2>&1'
+        else
+          case $SCHEDULER_LOG in
+            '' | /* | *..* | *[!A-Za-z0-9._/-]*)
+              echo "::error::scheduler-log must be /dev/null or a plain path inside the application directory." >&2; exit 2 ;;
+          esac
+          redirect=">> $SCHEDULER_LOG 2>&1"
+        fi
+        lines=()
+        while IFS= read -r raw || [ -n "$raw" ]; do
+          line=$(trim "$raw"); [ -n "$line" ] && lines+=("$line")
+        done <<<"$CRON_LINES"
+        if [ "${#lines[@]}" -eq 0 ]; then
+          # shellcheck disable=SC2016 # $HOME is for cron to expand on the host.
+          lines=("* * * * * cd \"\$HOME/$DEPLOY_DIR\" && $PHP_BINARY -d memory_limit=$CRON_MEMORY artisan schedule:run $redirect # JOB:$DEPLOY_DIR-scheduler")
+        fi
+        while IFS= read -r raw || [ -n "$raw" ]; do
+          line=$(trim "$raw"); [ -n "$line" ] && lines+=("$line")
+        done <<<"$EXTRA_CRON_LINES"
+        ssh "$TARGET" "bash -s -- $(printf '%q ' "$DEPLOY_DIR" "${lines[@]}")" \
+          <"$GITHUB_ACTION_PATH/scripts/install-cron.sh"
+
+    - name: Run the post-deploy script
+      if: inputs.post-deploy-script != ''
+      shell: bash
+      env:
+        TARGET: ${{ steps.ssh.outputs.target }}
+        DEPLOY_DIR: ${{ inputs.deploy-dir }}
+        PHP_BINARY: ${{ steps.resolve.outputs.php }}
+        SCRIPT: ${{ inputs.post-deploy-script }}
+      run: |
+        set -euo pipefail
+        [ -f "$SCRIPT" ] || { echo "::error::post-deploy-script '$SCRIPT' does not exist in the checkout." >&2; exit 2; }
+        ssh "$TARGET" "bash -s -- $(printf '%q ' "$DEPLOY_DIR" "$PHP_BINARY")" <"$SCRIPT"
+
+    - name: Verify site health
+      if: inputs.health-path != ''
+      shell: bash
+      env:
+        SITE_URL: ${{ inputs.site-url }}
+        HEALTH_PATH: ${{ inputs.health-path }}
+      run: |
+        set -euo pipefail
+        case $SITE_URL in
+          https://*) ;;
+          *) echo "::error::site-url must be an https URL, not '$SITE_URL'." >&2; exit 2 ;;
+        esac
+        curl --fail --silent --show-error --retry 3 --retry-all-errors --max-time 20 \
+          "${SITE_URL%/}$HEALTH_PATH" >/dev/null
+        echo "Healthy: ${SITE_URL%/}$HEALTH_PATH"
+
+    - name: Verify the web handler's PHP version and memory limit
+      if: inputs.verify-web-php == 'true'
+      shell: bash
+      env:
+        TARGET: ${{ steps.ssh.outputs.target }}
+        DEPLOY_DIR: ${{ inputs.deploy-dir }}
+        SITE_URL: ${{ inputs.site-url }}
+        PHP_VERSION_WANTED: ${{ inputs.php-version }}
+        MIN_MEMORY: ${{ inputs.web-memory-limit || '128M' }}
+      run: bash "$GITHUB_ACTION_PATH/scripts/verify-web-php.sh" "$TARGET" "$DEPLOY_DIR" "$SITE_URL" "$PHP_VERSION_WANTED" "$MIN_MEMORY"

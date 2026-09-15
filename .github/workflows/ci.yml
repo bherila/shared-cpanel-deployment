@@ -1,0 +1,44 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  scripts:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Shellcheck
+        run: shellcheck scripts/*.sh
+
+      - name: install-cron.sh harness
+        run: bash scripts/test-install-cron.sh
+
+      - name: rsync-deploy.sh harness
+        run: bash scripts/test-rsync-deploy.sh
+
+      - name: htaccess.sh harness
+        run: bash scripts/test-htaccess.sh
+
+      - name: configure-env.sh harness
+        run: bash scripts/test-configure-env.sh
+
+      - name: action.yml references only scripts that exist
+        run: |
+          set -euo pipefail
+          status=0
+          while IFS= read -r script; do
+            [ -f "$script" ] || { echo "::error file=action.yml::$script does not exist"; status=1; }
+          done < <(grep -o 'scripts/[A-Za-z0-9._-]*\.sh' action.yml | sort -u)
+          exit "$status"
+
+      - name: action.yml is valid YAML
+        run: ruby -ryaml -e 'YAML.load_file("action.yml")'
