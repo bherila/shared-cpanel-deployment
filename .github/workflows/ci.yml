@@ -31,6 +31,9 @@ jobs:
       - name: configure-env.sh harness
         run: bash scripts/test-configure-env.sh
 
+      - name: assert-no-pending-migrations.sh harness
+        run: bash scripts/test-assert-no-pending-migrations.sh
+
       - name: action.yml references only scripts that exist
         run: |
           set -euo pipefail

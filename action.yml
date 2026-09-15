@@ -116,7 +116,7 @@ inputs:
 
   # ── Artisan ──────────────────────────────────────────────────────────────────
   run-migrations:
-    description: Run `artisan migrate --force` after config:clear.
+    description: Run `artisan migrate --force` after config:clear, then fail if any migration remains pending.
     required: false
     default: 'true'
   artisan-commands:
@@ -297,19 +297,42 @@ runs:
         [ -f "$SCRIPT" ] || { echo "::error::pre-migrate-script '$SCRIPT' does not exist in the checkout." >&2; exit 2; }
         ssh "$TARGET" "bash -s -- $(printf '%q ' "$DEPLOY_DIR" "$PHP_BINARY")" <"$SCRIPT"
 
-    - name: Clear config, migrate, and cache config
+    - name: Clear config and migrate
       shell: bash
       env:
         TARGET: ${{ steps.ssh.outputs.target }}
         DEPLOY_DIR: ${{ inputs.deploy-dir }}
         PHP_BINARY: ${{ steps.resolve.outputs.php }}
         RUN_MIGRATIONS: ${{ inputs.run-migrations }}
-        EXTRA_COMMANDS: ${{ inputs.artisan-commands }}
       run: |
         set -euo pipefail
         commands=(config:clear)
         [ "$RUN_MIGRATIONS" = true ] && commands+=("migrate --force")
-        commands+=(config:cache)
+        ssh "$TARGET" "bash -s -- $(printf '%q ' "$DEPLOY_DIR" "$PHP_BINARY" "${commands[@]}")" \
+          <"$GITHUB_ACTION_PATH/scripts/remote-artisan.sh"
+
+    - name: Verify migrations completed
+      if: inputs.run-migrations == 'true'
+      shell: bash
+      env:
+        TARGET: ${{ steps.ssh.outputs.target }}
+        DEPLOY_DIR: ${{ inputs.deploy-dir }}
+        PHP_BINARY: ${{ steps.resolve.outputs.php }}
+      run: |
+        set -euo pipefail
+        ssh "$TARGET" "bash -s -- $(printf '%q ' "$DEPLOY_DIR" "$PHP_BINARY")" \
+          <"$GITHUB_ACTION_PATH/scripts/assert-no-pending-migrations.sh"
+
+    - name: Cache config and run extra Artisan commands
+      shell: bash
+      env:
+        TARGET: ${{ steps.ssh.outputs.target }}
+        DEPLOY_DIR: ${{ inputs.deploy-dir }}
+        PHP_BINARY: ${{ steps.resolve.outputs.php }}
+        EXTRA_COMMANDS: ${{ inputs.artisan-commands }}
+      run: |
+        set -euo pipefail
+        commands=(config:cache)
         while IFS= read -r line || [ -n "$line" ]; do
           [ -z "${line//[[:space:]]/}" ] && continue
           commands+=("$line")
