@@ -49,35 +49,87 @@ fi
 
 normalize_artisan_memory() {
     local line=$1
+    local rest=$line
+    local probe=$line
+    local result=''
+    local before
     local after_php
+    local matched
+    local before_artisan
+    local through_artisan
+    local leading_space
     local php_options
-    local replacement="$php -d memory_limit=$memory_limit "
+    local shell_boundary_re='[[:space:];|&()]'
+    local control_operator_re='[;|&()]'
+    local artisan_token_re='(^|[[:space:]])artisan([[:space:];|&()]|$)'
+    local php_artisan_re='(^|[[:space:];|&()])[^[:space:];|&()]*php[^[:space:];|&()]*[[:space:]]+([^;|&()]*[[:space:]])?artisan([[:space:];|&()]|$)'
+    local memory_option_re='(^|[[:space:]])-d[[:space:]]*memory_limit='
 
-    if [[ $line != *' artisan '* ]]; then
+    if [[ $line != *artisan* ]]; then
         printf '%s\n' "$line"
         return
     fi
 
-    if [[ $line == *"$php "* ]]; then
-        after_php=${line#*"$php "}
-        if [[ $after_php == artisan\ * || $after_php == *' artisan '* ]]; then
-            if [[ $after_php == artisan\ * ]]; then
-                php_options=''
-            else
-                php_options=${after_php%% artisan *}
-            fi
-            if [[ " $php_options " == *' -d memory_limit='* ]]; then
-                printf '%s\n' "$line"
-            else
-                printf '%s\n' "${line/"$php "/$replacement}"
-            fi
-            return
-        fi
+    if [[ $line == *"\"$php\""* || $line == *"'$php'"* ]]; then
+        echo "Managed Artisan cron lines must not quote the configured PHP binary." >&2
+        echo "Refused line: $line" >&2
+        exit 2
     fi
 
-    echo "Managed Artisan cron lines must invoke the configured PHP binary before 'artisan'." >&2
-    echo "Refused line: $line" >&2
-    exit 2
+    while [[ $rest == *"$php"* ]]; do
+        before=${rest%%"$php"*}
+        after_php=${rest#*"$php"}
+        result+="$before$php"
+        rest=$after_php
+
+        # A textual occurrence such as `[ -x /path/to/php ]` is not an
+        # executable token. Keep scanning for the PHP command that follows it.
+        if [[ -n $before && ! ${before: -1} =~ $shell_boundary_re ]]; then
+            continue
+        fi
+
+        # Support ordinary PHP CLI options while stopping at shell control
+        # operators. This ties `artisan` to this PHP token without attempting
+        # to parse arbitrary shell syntax.
+        if [[ $after_php =~ $artisan_token_re ]]; then
+            matched=${BASH_REMATCH[0]}
+            before_artisan=${after_php%%"$matched"*}
+            through_artisan="${before_artisan}${BASH_REMATCH[1]}artisan${BASH_REMATCH[2]}"
+
+            if [[ $through_artisan =~ ^([[:space:]]+) ]]; then
+                leading_space=${BASH_REMATCH[1]}
+            else
+                continue
+            fi
+            php_options=${before_artisan#"$leading_space"}
+
+            if [[ $php_options =~ $control_operator_re ]]; then
+                continue
+            fi
+
+            if [[ $php_options =~ $memory_option_re ]]; then
+                result+="$through_artisan"
+            else
+                result+="${leading_space}-d memory_limit=$memory_limit ${through_artisan#"$leading_space"}"
+            fi
+
+            rest=${after_php#"$through_artisan"}
+        fi
+    done
+
+    result+="$rest"
+
+    while [[ $probe =~ $php_artisan_re ]]; do
+        matched=${BASH_REMATCH[0]}
+        if [[ $matched != *"$php"* ]]; then
+            echo "Every Artisan invocation in a managed cron line must use the configured PHP binary and ordinary PHP CLI options." >&2
+            echo "Refused line: $line" >&2
+            exit 2
+        fi
+        probe=${probe#*"$matched"}
+    done
+
+    printf '%s\n' "$result"
 }
 
 lines=()
