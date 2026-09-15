@@ -176,7 +176,7 @@ inputs:
     required: false
     default: 'true'
   cron-memory-limit:
-    description: memory_limit for the default scheduler line (the CLI default on cPanel is 128M).
+    description: memory_limit for every managed Artisan cron line, including schedulers and workers (the CLI default on cPanel is 128M).
     required: false
     default: 1G
   scheduler-log:
@@ -550,31 +550,12 @@ runs:
         EXTRA_CRON_LINES: ${{ inputs.extra-cron-lines }}
       run: |
         set -euo pipefail
-        trim() { local v=$1; v=${v#"${v%%[![:space:]]*}"}; printf '%s' "${v%"${v##*[![:space:]]}"}"; }
-        case $CRON_MEMORY in
-          [1-9]*[0-9][GgMm] | [1-9][GgMm]) ;;
-          *) echo "::error::cron-memory-limit must look like 1G or 512M, not '$CRON_MEMORY'." >&2; exit 2 ;;
-        esac
-        if [ "$SCHEDULER_LOG" = /dev/null ]; then
-          redirect='> /dev/null 2>&1'
-        else
-          case $SCHEDULER_LOG in
-            '' | /* | *..* | *[!A-Za-z0-9._/-]*)
-              echo "::error::scheduler-log must be /dev/null or a plain path inside the application directory." >&2; exit 2 ;;
-          esac
-          redirect=">> $SCHEDULER_LOG 2>&1"
-        fi
-        lines=()
-        while IFS= read -r raw || [ -n "$raw" ]; do
-          line=$(trim "$raw"); [ -n "$line" ] && lines+=("$line")
-        done <<<"$CRON_LINES"
-        if [ "${#lines[@]}" -eq 0 ]; then
-          # shellcheck disable=SC2016 # $HOME is for cron to expand on the host.
-          lines=("* * * * * cd \"\$HOME/$DEPLOY_DIR\" && $PHP_BINARY -d memory_limit=$CRON_MEMORY artisan schedule:run $redirect # JOB:$DEPLOY_DIR-scheduler")
-        fi
-        while IFS= read -r raw || [ -n "$raw" ]; do
-          line=$(trim "$raw"); [ -n "$line" ] && lines+=("$line")
-        done <<<"$EXTRA_CRON_LINES"
+        cron_file=$(mktemp)
+        trap 'rm -f "$cron_file"' EXIT
+        bash "$GITHUB_ACTION_PATH/scripts/prepare-cron-lines.sh" \
+          "$DEPLOY_DIR" "$PHP_BINARY" "$CRON_MEMORY" "$SCHEDULER_LOG" "$CRON_LINES" "$EXTRA_CRON_LINES" \
+          >"$cron_file"
+        mapfile -t lines <"$cron_file"
         ssh "$TARGET" "bash -s -- $(printf '%q ' "$DEPLOY_DIR" "${lines[@]}")" \
           <"$GITHUB_ACTION_PATH/scripts/install-cron.sh"
 

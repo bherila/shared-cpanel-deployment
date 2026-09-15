@@ -22,6 +22,9 @@ jobs:
       - name: install-cron.sh harness
         run: bash scripts/test-install-cron.sh
 
+      - name: prepare-cron-lines.sh harness
+        run: bash scripts/test-prepare-cron-lines.sh
+
       - name: rsync-deploy.sh harness
         run: bash scripts/test-rsync-deploy.sh
 
