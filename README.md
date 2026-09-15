@@ -171,6 +171,10 @@ an optional private branding bundle can keep that policy declarative:
           /public/branding/
 ```
 
+Set `artisan-memory-limit: 1G` when migrations or application-specific Artisan commands exceed the
+host's CLI default. The limit applies to migration execution, the pending-migration assertion,
+config caching, and every command in `artisan-commands`.
+
 Leave `BRANDING_SOURCE` empty for the application's default theme. When set, point it at a directory
 such as `.config/identity/branding`; keep the canonical files there rather than inside the rsync target.
 
@@ -193,6 +197,7 @@ bash scripts/test-rsync-migrations.sh
 bash scripts/test-htaccess.sh
 bash scripts/test-configure-env.sh
 bash scripts/test-assert-no-pending-migrations.sh
+bash scripts/test-remote-artisan.sh
 bash scripts/test-ensure-passport-keys.sh
 bash scripts/test-install-branding.sh
 ```
