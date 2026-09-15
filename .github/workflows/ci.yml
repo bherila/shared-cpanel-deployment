@@ -25,6 +25,9 @@ jobs:
       - name: rsync-deploy.sh harness
         run: bash scripts/test-rsync-deploy.sh
 
+      - name: rsync-migrations.sh harness
+        run: bash scripts/test-rsync-migrations.sh
+
       - name: htaccess.sh harness
         run: bash scripts/test-htaccess.sh
 
@@ -33,6 +36,12 @@ jobs:
 
       - name: assert-no-pending-migrations.sh harness
         run: bash scripts/test-assert-no-pending-migrations.sh
+
+      - name: ensure-passport-keys.sh harness
+        run: bash scripts/test-ensure-passport-keys.sh
+
+      - name: install-branding.sh harness
+        run: bash scripts/test-install-branding.sh
 
       - name: action.yml references only scripts that exist
         run: |

@@ -10,6 +10,7 @@
 #   <source>   A file under $HOME installed as .env (mode 600) first, or '' to keep the existing .env.
 #   <op>...    SET:KEY=value  set KEY, replacing an existing assignment or appending one
 #              REQUIRE:KEY    fail unless KEY is assigned a non-empty value
+#              ASSERT:KEY=value fail unless that exact, unquoted assignment is present
 #
 # Every SET is applied to a copy; the live .env is replaced only when something changed, after the
 # previous one is saved to ~/.env-backups/<app-dir>/ (outside the deploy directory, where rsync
@@ -44,6 +45,7 @@ if [ ! -d "$app" ]; then
     exit 1
 fi
 
+candidate="$app/.env"
 if [ -n "$source_file" ]; then
     case $source_file in
         /* | *..*) echo "::error::env-source must be a path under the account home without '..'." >&2; exit 2 ;;
@@ -52,20 +54,20 @@ if [ -n "$source_file" ]; then
         echo "::error::env-source ~/$source_file does not exist on the host." >&2
         exit 1
     fi
-    install -m 600 "$HOME/$source_file" "$app/.env"
-    echo "Installed .env from ~/$source_file."
+    candidate="$HOME/$source_file"
 fi
 
-if [ ! -f "$app/.env" ]; then
+if [ ! -f "$candidate" ]; then
     echo "::error::~/$app_dir/.env does not exist. Create it on the host or set env-source." >&2
     exit 1
 fi
 
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
-cp "$app/.env" "$work/next"
+cp "$candidate" "$work/next"
 
 requires=()
+assertions=()
 for op in "$@"; do
     case $op in
         SET:*)
@@ -104,27 +106,43 @@ for op in "$@"; do
                 exit 2
             fi
             requires+=("$key") ;;
+        ASSERT:*)
+            assignment=${op#ASSERT:}
+            key=${assignment%%=*}
+            if [ "$key" = "$assignment" ] || ! valid_key "$key"; then
+                echo "::error::'${key}' is not a valid .env assertion key (A-Z, 0-9, _), or the assertion has no '='." >&2
+                exit 2
+            fi
+            case $assignment in
+                *$'\n'*) echo "::error::The assertion for $key contains a newline." >&2; exit 2 ;;
+            esac
+            assertions+=("$assignment") ;;
         *)
             echo "::error::Unknown operation '${op%%:*}'." >&2
             exit 2 ;;
     esac
 done
 
-if ! cmp -s "$app/.env" "$work/next"; then
-    backups="$HOME/.env-backups/$app_dir"
-    install -d -m 700 "$HOME/.env-backups" "$backups"
-    backup="$backups/.env-$(date -u +%Y%m%dT%H%M%SZ)"
-    install -m 600 "$app/.env" "$backup"
-    install -m 600 "$work/next" "$app/.env"
-    # Keep the ten most recent.
-    find "$backups" -maxdepth 1 -type f -name '.env-*' | sort -r | tail -n +11 | while IFS= read -r old; do rm -f "$old"; done
-    echo "Updated .env (previous saved to $backup)."
+failed_assertions=()
+for assignment in ${assertions[@]+"${assertions[@]}"}; do
+    key=${assignment%%=*}
+    counts=$(awk -v key="$key" -v exact="$assignment" '
+        $0 ~ "^(export[ \\t]+)?" key "[ \\t]*=" { total += 1; if ($0 == exact) matched += 1 }
+        END { print total + 0, matched + 0 }
+    ' "$work/next")
+    if [ "$counts" != '1 1' ]; then
+        failed_assertions+=("$key")
+    fi
+done
+if [ "${#failed_assertions[@]}" -gt 0 ]; then
+    echo "::error::~/$app_dir/.env failed exact assertions for: ${failed_assertions[*]}" >&2
+    exit 1
 fi
 
 missing=()
 for key in ${requires[@]+"${requires[@]}"}; do
-    if ! grep -Eq "^(export[[:space:]]+)?${key}[[:space:]]*=[[:space:]]*[^[:space:]#]" "$app/.env" \
-        || grep -Eq "^(export[[:space:]]+)?${key}[[:space:]]*=[[:space:]]*(\"\"|'')[[:space:]]*$" "$app/.env"; then
+    if ! grep -Eq "^(export[[:space:]]+)?${key}[[:space:]]*=[[:space:]]*[^[:space:]#]" "$work/next" \
+        || grep -Eq "^(export[[:space:]]+)?${key}[[:space:]]*=[[:space:]]*(\"\"|'')[[:space:]]*$" "$work/next"; then
         missing+=("$key")
     fi
 done
@@ -132,6 +150,26 @@ done
 if [ "${#missing[@]}" -gt 0 ]; then
     echo "::error::~/$app_dir/.env is missing a value for: ${missing[*]}" >&2
     exit 1
+fi
+
+if [ ! -f "$app/.env" ] || ! cmp -s "$app/.env" "$work/next"; then
+    backups="$HOME/.env-backups/$app_dir"
+    backup=''
+    if [ -f "$app/.env" ]; then
+        install -d -m 700 "$HOME/.env-backups" "$backups"
+        backup="$backups/.env-$(date -u +%Y%m%dT%H%M%SZ)"
+        install -m 600 "$app/.env" "$backup"
+    fi
+    install -m 600 "$work/next" "$app/.env"
+    # Keep the ten most recent.
+    if [ -n "$backup" ]; then
+        find "$backups" -maxdepth 1 -type f -name '.env-*' | sort -r | tail -n +11 | while IFS= read -r old; do rm -f "$old"; done
+        echo "Updated .env (previous saved to $backup)."
+    else
+        echo "Installed .env."
+    fi
+else
+    chmod 600 "$app/.env"
 fi
 
 echo ".env checked: ${#requires[@]} required key(s) present."
