@@ -75,10 +75,16 @@ Pin the action to a full commit SHA. The job holds a key that reaches every appl
 | `app-env`, `app-url`, `app-debug` | — | Set these keys when given; empty leaves them alone. |
 | `env-values` | — | `KEY=value` lines to set. **Not for secrets**: use `env-source`. |
 | `required-env-keys` | `APP_KEY` `APP_ENV` `APP_URL` | The deploy stops before migrating if any is missing or empty. |
+| `env-assert` | — | Exact `KEY=value` lines that must be present after `.env` updates, for deployment-profile and similar boundaries. |
+| **Persistent runtime files** | | |
+| `passport-key-directory` | — | Relative path containing Passport's two OAuth keys. Keeps a complete pair, creates an absent pair, and refuses a partial pair. |
+| `branding-source` | — | Private directory below `~/.config/` copied into `public/branding` after upload. Empty skips branding. |
+| `branding-files` | four standard files | Plain names required in the source and copied atomically. |
 | **Artisan** | | |
 | `run-migrations` | `true` | `migrate --force`, followed by an assertion that none remain pending. |
+| `migration-order` | `after-upload` | Use `before-upload` to upload only `database/migrations`, migrate the existing release, verify the result, and then upload application code. |
 | `artisan-commands` | — | Extra invocations after `config:cache`, e.g. `view:clear`. |
-| `pre-migrate-script` | — | A script in your checkout, run on the host after upload and `.env`, before artisan. Gets `<deploy-dir> <php>`. |
+| `pre-migrate-script` | — | A script in your checkout, run after `.env` and before migration. With `before-upload`, it runs against the previous release before the main upload. Gets `<deploy-dir> <php>`. |
 | `post-deploy-script` | — | Same, after artisan and cron. |
 | **Cron** | | |
 | `install-cron` | `true` | |
@@ -112,10 +118,23 @@ legacy line for the application is replaced rather than left running beside the 
 
 **`.env`** (`scripts/configure-env.sh`). Changes are applied to a copy and installed only when something
 changed, after the previous file is saved to `~/.env-backups/<deploy-dir>/` (outside the deploy
-directory, where `--delete` would remove it). Values are never printed.
+directory, where `--delete` would remove it). Exact assertions fail before the candidate `.env` is
+installed. Values are never printed.
+
+**Persistent Passport and branding files.** Passport setup keeps an existing complete signing pair,
+creates keys only when neither file exists, and refuses a half-present pair. A configured branding
+source must be a real directory below `~/.config/`; every named source must be a nonempty regular file.
+Files are copied through same-directory temporary files into `public/branding`, and the private source
+remains outside the guarded application upload.
 
 **Webroot symlink** (`scripts/ensure-webroot-symlink.sh`). Creates or repoints a symlink; never removes
 a real file or directory, which may be another domain's document root or its AutoSSL challenge files.
+
+**Migration-first deployments** (`migration-order: before-upload`). The action accepts this only for
+an existing Laravel deployment. It verifies that the application and migration directories are real,
+uploads candidate migration files without `--delete`, installs the configured environment, runs the
+pre-migrate hook and migrations against the previous release, and confirms none remain pending before
+the main upload begins. Migrations used this way must remain compatible with the previous release.
 
 ## Application-specific steps
 
@@ -135,6 +154,26 @@ against the `ssh-target` output:
     - run: ssh ${{ steps.deploy.outputs.ssh-target }} "cd ~/svc-laravel && …"
 ```
 
+An existing identity provider that needs schema expansion before code, persistent Passport keys and
+an optional private branding bundle can keep that policy declarative:
+
+```yaml
+    - uses: bherila/shared-cpanel-deployment@<sha>
+      with:
+        # connection, deploy-dir and site-url omitted
+        migration-order: before-upload
+        env-source: .config/identity/deployment.env
+        env-assert: AUTH_MANAGER_PROFILE=resource
+        passport-key-directory: storage/app/private/oauth
+        branding-source: ${{ vars.BRANDING_SOURCE }}
+        excludes: |
+          .db-credentials
+          /public/branding/
+```
+
+Leave `BRANDING_SOURCE` empty for the application's default theme. When set, point it at a directory
+such as `.config/identity/branding`; keep the canonical files there rather than inside the rsync target.
+
 ## Migrating an existing deploy job
 
 - Delete the `Append to .htaccess` step and `htaccess-append.txt`, or leave them: an existing handler for
@@ -150,9 +189,12 @@ against the `ssh-target` output:
 shellcheck scripts/*.sh
 bash scripts/test-install-cron.sh
 bash scripts/test-rsync-deploy.sh
+bash scripts/test-rsync-migrations.sh
 bash scripts/test-htaccess.sh
 bash scripts/test-configure-env.sh
 bash scripts/test-assert-no-pending-migrations.sh
+bash scripts/test-ensure-passport-keys.sh
+bash scripts/test-install-branding.sh
 ```
 
 Release by tagging `vX.Y.Z`; callers pin the tag's commit SHA.
