@@ -58,20 +58,20 @@ normalize_artisan_memory() {
     local leading_space
     local php_options
     local trailing_boundary
-    local artisan_count=0
+    local php_artisan_count=0
     local normalized_count=0
-    local artisan_token_re='(^|[[:space:];|&()])artisan([[:space:];|&()]|$)'
+    local php_artisan_re='(^|[[:space:];|&()])[^[:space:];|&()]*php[0-9.-]*[[:space:]]+([^;|&()]*[[:space:]])?artisan([[:space:];|&()]|$)'
     local shell_boundary_re='[[:space:];|&()]'
     local invocation_re='^([[:space:]]+)([^;|&()]*[[:space:]])?artisan([[:space:];|&()]|$)'
     local memory_option_re='(^|[[:space:]])-d[[:space:]]*memory_limit='
 
-    while [[ $probe =~ $artisan_token_re ]]; do
+    while [[ $probe =~ $php_artisan_re ]]; do
         matched=${BASH_REMATCH[0]}
-        artisan_count=$((artisan_count + 1))
+        php_artisan_count=$((php_artisan_count + 1))
         probe=${probe#*"$matched"}
     done
 
-    if [ "$artisan_count" -eq 0 ]; then
+    if [ "$php_artisan_count" -eq 0 ] && [[ $line != *"$php"* ]]; then
         printf '%s\n' "$line"
         return
     fi
@@ -110,7 +110,7 @@ normalize_artisan_memory() {
 
     result+="$rest"
 
-    if [ "$normalized_count" -ne "$artisan_count" ]; then
+    if [ "$normalized_count" -lt "$php_artisan_count" ]; then
         echo "Every Artisan invocation in a managed cron line must use the configured PHP binary and ordinary PHP CLI options." >&2
         echo "Refused line: $line" >&2
         exit 2

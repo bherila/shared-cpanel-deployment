@@ -66,6 +66,11 @@ bash "$script" app "$PHP" 1G /dev/null "$mixed_php" '' >/dev/null 2>&1
 status=$?
 check "a chained Artisan invocation through another PHP binary is refused" test "$status" -eq 2
 
+artisan_argument='* * * * * cd "$HOME/app" && /opt/cpanel/ea-php85/root/usr/bin/php artisan custom:run artisan # JOB:app-worker'
+output=$(bash "$script" app "$PHP" 1G /dev/null "$artisan_argument" '')
+expected_artisan_argument='* * * * * cd "$HOME/app" && /opt/cpanel/ea-php85/root/usr/bin/php -d memory_limit=1G artisan custom:run artisan # JOB:app-worker'
+check "an Artisan word used as an argument is not counted as another invocation" test "$output" = "$expected_artisan_argument"
+
 non_artisan='0 * * * * cd "$HOME/app" && ./scripts/rotate.sh # JOB:app-rotate'
 output=$(bash "$script" app "$PHP" 1G /dev/null "$non_artisan" '')
 check "non-Artisan managed commands are unchanged" test "$output" = "$non_artisan"
