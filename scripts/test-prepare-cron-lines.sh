@@ -100,5 +100,17 @@ bash "$script" app "$PHP" 128 /dev/null '' '' >/dev/null 2>&1
 status=$?
 check "a unitless memory limit is refused" test "$status" -eq 2
 
+for invalid_memory in '1oops2G' '1;echo PWNED;2G' '0G' '1K'; do
+    bash "$script" app "$PHP" "$invalid_memory" /dev/null '' '' >/dev/null 2>&1
+    status=$?
+    check "invalid cron memory limit '$invalid_memory' is refused" test "$status" -eq 2
+done
+
+for valid_memory in '1G' '512M' '2g' '768m'; do
+    bash "$script" app "$PHP" "$valid_memory" /dev/null '' '' >/dev/null 2>&1
+    status=$?
+    check "valid cron memory limit '$valid_memory' is accepted" test "$status" -eq 0
+done
+
 echo "failures: $fails"
 exit "$fails"

@@ -51,6 +51,16 @@ setup
 PHP_VERSION_WANTED=8 run; v=$?
 WEB_MEMORY_LIMIT=lots run; m=$?
 check "an invalid version or memory limit is refused" '[ "$v" -eq 2 ] && [ "$m" -eq 2 ] && [ "$(count "AddHandler")" = 0 ]'
+for invalid_memory in '1oops2G' '1;echo PWNED;2G' '0M'; do
+    setup
+    WEB_MEMORY_LIMIT="$invalid_memory" run; status=$?
+    check "invalid web memory limit '$invalid_memory' is refused" '[ "$status" -eq 2 ] && [ "$(count "php_value")" = 0 ]'
+done
+for valid_memory in '1024M' '1G' '512K' '1073741824' '-1'; do
+    setup
+    WEB_MEMORY_LIMIT="$valid_memory" run; status=$?
+    check "valid web memory limit '$valid_memory' is accepted" '[ "$status" -eq 0 ] && [ "$(count "php_value memory_limit $valid_memory")" = 1 ]'
+done
 setup
 rm "$root/public/.htaccess"
 run; status=$?

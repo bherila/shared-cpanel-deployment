@@ -27,13 +27,10 @@ trim() {
     printf '%s' "${value%"${value##*[![:space:]]}"}"
 }
 
-case $memory_limit in
-    [1-9]*[0-9][GgMm] | [1-9][GgMm]) ;;
-    *)
-        echo "cron-memory-limit must look like 1G or 512M, not '$memory_limit'." >&2
-        exit 2
-        ;;
-esac
+if [[ ! $memory_limit =~ ^[1-9][0-9]*[MGmg]$ ]]; then
+    echo "cron-memory-limit must look like 1G or 512M, not '$memory_limit'." >&2
+    exit 2
+fi
 
 if [ "$scheduler_log" = /dev/null ]; then
     redirect='> /dev/null 2>&1'
