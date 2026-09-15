@@ -71,6 +71,22 @@ output=$(bash "$script" app "$PHP" 1G /dev/null "$artisan_argument" '')
 expected_artisan_argument='* * * * * cd "$HOME/app" && /opt/cpanel/ea-php85/root/usr/bin/php -d memory_limit=1G artisan custom:run artisan # JOB:app-worker'
 check "an Artisan word used as an argument is not counted as another invocation" test "$output" = "$expected_artisan_argument"
 
+artisan_memory_argument='* * * * * cd "$HOME/app" && /opt/cpanel/ea-php85/root/usr/bin/php artisan custom:run -d memory_limit=64M artisan # JOB:app-worker'
+output=$(bash "$script" app "$PHP" 1G /dev/null "$artisan_memory_argument" '')
+expected_artisan_memory_argument='* * * * * cd "$HOME/app" && /opt/cpanel/ea-php85/root/usr/bin/php -d memory_limit=1G artisan custom:run -d memory_limit=64M artisan # JOB:app-worker'
+check "PHP-looking Artisan arguments do not suppress the process limit" test "$output" = "$expected_artisan_memory_argument"
+
+quoted_php='* * * * * cd "$HOME/app" && "/opt/cpanel/ea-php85/root/usr/bin/php" artisan queue:work # JOB:app-worker'
+bash "$script" app "$PHP" 1G /dev/null "$quoted_php" '' >/dev/null 2>&1
+status=$?
+check "a quoted configured PHP path is refused explicitly" test "$status" -eq 2
+
+CUSTOM_PHP=/usr/local/bin/php-cli
+mixed_custom_php='* * * * * cd "$HOME/app" && /usr/local/bin/php-cli artisan schedule:run && php artisan queue:work # JOB:app-worker'
+bash "$script" app "$CUSTOM_PHP" 1G /dev/null "$mixed_custom_php" '' >/dev/null 2>&1
+status=$?
+check "a custom PHP executable cannot hide another PHP binary" test "$status" -eq 2
+
 non_artisan='0 * * * * cd "$HOME/app" && ./scripts/rotate.sh # JOB:app-rotate'
 output=$(bash "$script" app "$PHP" 1G /dev/null "$non_artisan" '')
 check "non-Artisan managed commands are unchanged" test "$output" = "$non_artisan"
