@@ -46,6 +46,26 @@ two_options='* * * * * cd "$HOME/app" && /opt/cpanel/ea-php85/root/usr/bin/php -
 output=$(bash "$script" app "$PHP" 1G /dev/null "$two_options" '')
 check "an explicit limit after another PHP option is preserved" test "$output" = "$two_options"
 
+tabbed=$'* * * * * cd "$HOME/app" && /opt/cpanel/ea-php85/root/usr/bin/php\tartisan queue:work # JOB:app-worker'
+output=$(bash "$script" app "$PHP" 1G /dev/null "$tabbed" '')
+expected_tabbed=$'* * * * * cd "$HOME/app" && /opt/cpanel/ea-php85/root/usr/bin/php\t-d memory_limit=1G artisan queue:work # JOB:app-worker'
+check "tabs between PHP and Artisan are supported" test "$output" = "$expected_tabbed"
+
+tested_php='* * * * * cd "$HOME/app" && [ -x /opt/cpanel/ea-php85/root/usr/bin/php ] && /opt/cpanel/ea-php85/root/usr/bin/php artisan queue:work # JOB:app-worker'
+output=$(bash "$script" app "$PHP" 1G /dev/null "$tested_php" '')
+expected_tested_php='* * * * * cd "$HOME/app" && [ -x /opt/cpanel/ea-php85/root/usr/bin/php ] && /opt/cpanel/ea-php85/root/usr/bin/php -d memory_limit=1G artisan queue:work # JOB:app-worker'
+check "a prior textual PHP path is not modified" test "$output" = "$expected_tested_php"
+
+chained='* * * * * cd "$HOME/app" && /opt/cpanel/ea-php85/root/usr/bin/php artisan schedule:run && /opt/cpanel/ea-php85/root/usr/bin/php -d opcache.enable_cli=1 artisan queue:work # JOB:app-worker'
+output=$(bash "$script" app "$PHP" 1G /dev/null "$chained" '')
+expected_chained='* * * * * cd "$HOME/app" && /opt/cpanel/ea-php85/root/usr/bin/php -d memory_limit=1G artisan schedule:run && /opt/cpanel/ea-php85/root/usr/bin/php -d memory_limit=1G -d opcache.enable_cli=1 artisan queue:work # JOB:app-worker'
+check "every Artisan invocation in a chained line is normalized" test "$output" = "$expected_chained"
+
+mixed_php='* * * * * cd "$HOME/app" && /opt/cpanel/ea-php85/root/usr/bin/php artisan schedule:run && php artisan queue:work # JOB:app-worker'
+bash "$script" app "$PHP" 1G /dev/null "$mixed_php" '' >/dev/null 2>&1
+status=$?
+check "a chained Artisan invocation through another PHP binary is refused" test "$status" -eq 2
+
 non_artisan='0 * * * * cd "$HOME/app" && ./scripts/rotate.sh # JOB:app-rotate'
 output=$(bash "$script" app "$PHP" 1G /dev/null "$non_artisan" '')
 check "non-Artisan managed commands are unchanged" test "$output" = "$non_artisan"
