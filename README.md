@@ -152,9 +152,11 @@ is explicitly report-only while the filesystem gate remains mandatory. On first 
 read-only preflight reports stable/webroot links, persistent types and symlinks, and filesystem devices.
 The guarded conversion enters maintenance, pauses cron, drains workers, moves runtime data into
 `shared`, and records exact metadata on the unchanged real directory. A candidate failure before the
-database-risk boundary restores that same code. Activation retains the real old directory under
-`releases/` and moves the prepared candidate into the stable name. Durable state brackets both rename
-boundaries: interruption before the first leaves old code selected down; interruption between them
+database-risk boundary restores that same code. Activation is a guarded, recoverable two-rename
+transition: it retains the real old directory under `releases/`, then moves the prepared candidate into
+the stable name. It is not a single atomic directory exchange; the stable path is briefly absent between
+the two same-filesystem renames while the application and its cron are quiesced. Durable state brackets
+both boundaries: interruption before the first leaves old code selected down; interruption between them
 completes exact candidate selection down; interruption after the second proves the selected candidate.
 
 `atomic-layout: release-symlink` preserves the v2.0 selection mechanism only for hosts where the vhost

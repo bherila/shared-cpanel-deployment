@@ -400,6 +400,15 @@ bash "$script" serve app real-first "$php" >/dev/null; bash "$script" commit app
 check "real-directory healthy deployment reports exact selected release" test "$(status_field real-first live_release)" = real-first
 check "real-directory healthy deployment reports exact commit" test "$(status_field real-first live_commit)" = "$commit"
 
+# A real stable path is only a location token; its exact release and commit
+# identity captured by begin must remain unchanged through quiescence.
+begin_and_upload_directory real-prior-tamper; bash "$script" preflight app real-prior-tamper '' >/dev/null; cp "$CRONTAB_FILE" "$root/prior-tamper-cron"
+mv -T "$HOME/app" "$root/original-stable"; cp -a "$root/original-stable" "$HOME/app"; sed -i 's/^release=.*/release=swapped-release/' "$HOME/app/.deploy-release"
+bash "$script" quiesce app real-prior-tamper "$php" >/dev/null 2>&1
+check "quiesce rejects a different managed real directory swapped in after begin" test "$?" -ne 0
+check "prior identity mismatch is refused before cron mutation" cmp -s "$CRONTAB_FILE" "$root/prior-tamper-cron"
+rm -rf "$HOME/app"; mv -T "$root/original-stable" "$HOME/app"; bash "$script" finalize app real-prior-tamper "$php" >/dev/null
+
 # Reproduce SVC's manually recovered hybrid state: the exact selected release
 # is a real stable directory while a managed copy with the same id remains.
 cp -a "$HOME/app" "$HOME/.deployments/app/releases/real-first"
@@ -442,6 +451,13 @@ bash "$script" finalize app real-rollback "$php" >/dev/null
 check "real-directory rollback restores exact prior metadata" test "$(status_field real-rollback live_release)" = "$prior_real_release"
 check "real-directory rollback proves prior code serving" test "$(status_field real-rollback live_state)" = serving
 check_expr "real-directory rollback never restores a symlinked vhost ancestor" '[ -d "$HOME/app" ] && [ ! -L "$HOME/app" ]'
+
+setup; make_legacy; begin_and_upload_directory real-candidate-tamper; preflight_quiesce real-candidate-tamper; bash "$script" prepare app real-candidate-tamper "$php" >/dev/null; bash "$script" risk app real-candidate-tamper "$php" >/dev/null; bash "$script" activate app real-candidate-tamper "$php" >/dev/null
+transaction="$HOME/.deployments/app/state/real-candidate-tamper"; prior_target=$(cat "$transaction/previous_target"); mv -T "$HOME/app" "$candidate"; mv -T "$HOME/$prior_target" "$HOME/app"; : >"$PHP_LOG"
+bash "$script" serve app real-candidate-tamper "$php" >/dev/null 2>&1
+check "serve rejects an off-live exact candidate when stable selects another managed release" test "$?" -ne 0
+check "candidate selection mismatch never runs artisan up on an off-live copy" test ! -s "$PHP_LOG"
+bash "$script" finalize app real-candidate-tamper "$php" >/dev/null
 
 setup; make_legacy; begin_and_upload symlink-established; preflight_quiesce symlink-established; bash "$script" prepare app symlink-established "$php" >/dev/null; bash "$script" risk app symlink-established "$php" >/dev/null; bash "$script" activate app symlink-established "$php" >/dev/null; bash "$script" serve app symlink-established "$php" >/dev/null; bash "$script" commit app symlink-established "$php" >/dev/null; bash "$script" finalize app symlink-established "$php" >/dev/null
 check "migration fixture begins with the legacy v2 managed symlink" test -L "$HOME/app"

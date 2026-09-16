@@ -1,7 +1,7 @@
 name: Deploy Laravel to cPanel
 description: >-
   Deploy Laravel to versioned releases on a shared cPanel account: pinned SSH, guarded candidate upload,
-  persistent runtime data, candidate migrations and checks, atomic activation, scoped cron, recovery,
+  persistent runtime data, candidate migrations and checks, failure-safe activation, scoped cron, recovery,
   and exact live-release reporting. Legacy in-place deployment remains an explicit escape hatch.
 author: bherila
 

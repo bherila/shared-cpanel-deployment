@@ -188,17 +188,32 @@ metadata_value() {
     sed -n "s/^${key}=//p" "$root/.deploy-release" | head -1
 }
 
-release_root() {
-    local wanted=$1 selected_release
-    if [ -d "$stable" ] && [ ! -L "$stable" ]; then
-        selected_release=$(metadata_value "$stable" release || true)
-        if [ "$selected_release" = "$wanted" ]; then
-            printf '%s\n' "$stable"
-            return 0
-        fi
+prove_previous_identity() {
+    local target=$1 expected_release expected_commit
+    [ "$target" = stable ] || return 0
+    read_value previous_release || return 1; expected_release=$REPLY
+    read_value previous_commit || return 1; expected_commit=$REPLY
+    [ "$(selected_target)" = stable ] || return 1
+    [ "$(metadata_value "$stable" release || true)" = "$expected_release" ] || return 1
+    [ "$(metadata_value "$stable" commit || true)" = "$expected_commit" ]
+}
+
+selected_candidate_root() {
+    local layout expected_commit target
+    transaction_layout || return 1; layout=$REPLY
+    read_value commit || return 1; expected_commit=$REPLY
+    target=$(selected_target)
+    if [ "$layout" = stable-directory ]; then
+        [ "$target" = stable ] || return 1
+        [ "$(metadata_value "$stable" release || true)" = "$release_id" ] || return 1
+        [ "$(metadata_value "$stable" commit || true)" = "$expected_commit" ] || return 1
+        printf '%s\n' "$stable"
+    else
+        [ "$target" = ".deployments/$app_name/releases/$release_id" ] || return 1
+        [ "$(metadata_value "$candidate" release || true)" = "$release_id" ] || return 1
+        [ "$(metadata_value "$candidate" commit || true)" = "$expected_commit" ] || return 1
+        printf '%s\n' "$candidate"
     fi
-    [ -d "$releases/$wanted" ] && [ ! -L "$releases/$wanted" ] || return 1
-    printf '%s\n' "$releases/$wanted"
 }
 
 validate_release_target() {
@@ -319,7 +334,7 @@ switch_stable() {
     if [ -L "$stable" ]; then
         mv -Tf "$temporary" "$stable"
     elif [ ! -e "$stable" ]; then
-        mv "$temporary" "$stable"
+        mv -T "$temporary" "$stable"
     else
         rm -f "$temporary"
         echo "::error::Stable path is not a symlink during activation." >&2
@@ -358,14 +373,17 @@ switch_real_directory() {
         write_value activation_previous_release "$prior_release"
         write_value activation_previous_target "$prior_target"
         write_value phase activating_before_prior_rename
-        mv "$stable" "$HOME/$prior_target"
+        mv -T "$stable" "$HOME/$prior_target"
+        [ ! -e "$stable" ] && [ ! -L "$stable" ] || { echo "::error::Stable path still exists after retaining prior code." >&2; return 1; }
+        [ "$(metadata_value "$HOME/$prior_target" release || true)" = "$prior_release" ] || { echo "::error::Retained prior release identity could not be proved." >&2; return 1; }
         write_value previous_target "$prior_target"
         write_value phase activating_after_prior_rename
     else
         write_value activation_previous_target none
         write_value phase activating_after_prior_rename
     fi
-    mv "$candidate" "$stable"
+    mv -T "$candidate" "$stable"
+    selected_candidate_root >/dev/null || { echo "::error::Candidate identity could not be proved after activation." >&2; return 1; }
     write_value phase activating_after_candidate_rename
 }
 
@@ -532,6 +550,7 @@ preflight() {
         exit 1
     fi
     selected=$(selected_target)
+    prove_previous_identity "$selected" || { echo "::error::Managed real-directory identity changed after begin." >&2; exit 1; }
     echo "Preflight stable selection: $selected"
     if [ "$selected" = legacy ] || { [ "$layout" = stable-directory ] && [ "$selected" != stable ] && [ "$selected" != none ]; }; then
         echo 'conversion_required=true'
@@ -662,7 +681,7 @@ begin() {
         echo "usage: ... begin <app> <release> <commit> <lock-seconds> <retain> <failure-policy> <initial-live-commit> <path>..." >&2
         exit 2
     fi
-    local commit=$1 lock_seconds=$2 retain=$3 failure_policy=$4 initial_live_commit=$5 legacy_commit_temp layout=release-symlink
+    local commit=$1 lock_seconds=$2 retain=$3 failure_policy=$4 initial_live_commit=$5 legacy_commit_temp layout=release-symlink previous_release previous_commit
     shift 5
     case ${1:-} in
         stable-directory | release-symlink) layout=$1; shift ;;
@@ -748,6 +767,12 @@ begin() {
                 echo "::error::A managed real stable directory requires atomic-layout stable-directory." >&2
                 exit 1
             fi
+            previous_release=$(metadata_value "$stable" release || true)
+            previous_commit=$(metadata_value "$stable" commit || true)
+            plain_name "$previous_release" || { rm -rf "$candidate" "$transaction" "$lock"; echo "::error::Managed real directory has invalid release metadata." >&2; exit 1; }
+            [[ $previous_commit =~ ^[0-9A-Fa-f]{7,64}$ ]] || { rm -rf "$candidate" "$transaction" "$lock"; echo "::error::Managed real directory has invalid commit metadata." >&2; exit 1; }
+            write_value previous_release "$previous_release"
+            write_value previous_commit "$previous_commit"
             write_value previous_target "$selected" ;;
         invalid) rm -rf "$candidate" "$transaction" "$lock"; echo "::error::~/$app_name is neither absent, a Laravel app, nor a managed release symlink." >&2; exit 1 ;;
         *) validate_release_target "$selected" || { rm -rf "$candidate" "$transaction" "$lock"; echo "::error::Stable symlink target '$selected' is outside the managed release tree." >&2; exit 1; }; write_value previous_target "$selected" ;;
@@ -772,7 +797,7 @@ link_persistent_path() {
         return 0
     fi
     if [ ! -e "$destination" ]; then
-        if [ -e "$source" ]; then mv "$source" "$destination"; else return 3; fi
+        if [ -e "$source" ]; then mv -T "$source" "$destination"; else return 3; fi
     elif [ -e "$source" ] && [ "$replace_source" != true ]; then
         echo "::error::Both '$source' and '$destination' exist; refusing to choose or delete either persistent copy." >&2
         return 1
@@ -798,6 +823,7 @@ quiesce() {
     require_owner
     case $(cat "$transaction/phase") in preflight | prepared) ;; *) echo "::error::Read-only preflight must pass before quiescing." >&2; exit 1 ;; esac
     read_value previous_target; previous=$REPLY
+    prove_previous_identity "$previous" || { echo "::error::Selected real-directory identity changed before quiescence." >&2; exit 1; }
     if [ "$previous" != none ]; then
         root=$(root_for_target "$previous") || { echo "::error::The selected application root is invalid." >&2; exit 1; }
         maintenance_state "$php" "$root" "$memory" || state=$?
@@ -832,6 +858,7 @@ prepare() {
     [ -f "$candidate/artisan" ] || { echo "::error::Candidate release has no artisan file after upload." >&2; exit 1; }
     case $(cat "$transaction/phase") in preflight | quiesced) ;; *) echo "::error::Candidate is not ready for preparation." >&2; exit 1 ;; esac
     read_value previous_target; previous=$REPLY
+    prove_previous_identity "$previous" || { echo "::error::Selected real-directory identity changed before preparation." >&2; exit 1; }
     transaction_layout || { echo "::error::Transaction has an invalid atomic layout." >&2; exit 1; }
     layout=$REPLY
     if { [ "$previous" = legacy ] || { [ "$layout" = stable-directory ] && [ "$previous" != stable ] && [ "$previous" != none ]; }; } && [ "$(cat "$transaction/recovery_required")" != true ]; then
@@ -856,12 +883,14 @@ prepare() {
         read_value initial_live_commit
         if [ "$layout" = stable-directory ]; then
             write_release_metadata "$stable" "$legacy_id" "$REPLY"
+            write_value previous_release "$legacy_id"
+            write_value previous_commit "$REPLY"
             converted=true
             write_value previous_target stable
             previous=stable
             echo "Adopted legacy ~/$app_name as managed real directory $legacy_id in maintenance."
         else
-            mv "$stable" "$legacy_root"
+            mv -T "$stable" "$legacy_root"
             write_release_metadata "$legacy_root" "$legacy_id" "$REPLY"
             ln -s "$legacy_target" "$stable"
             converted=true
@@ -885,7 +914,11 @@ prepare() {
         write_value phase converting_symlink
         rm "$stable"
         write_value phase symlink_removed
-        mv "$previous_root" "$stable"
+        mv -T "$previous_root" "$stable"
+        [ "$(metadata_value "$stable" release || true)" = "$previous_release" ] || { echo "::error::Moved release identity is not selected at the real stable path." >&2; exit 1; }
+        [ "$(metadata_value "$stable" commit || true)" = "$previous_commit" ] || { echo "::error::Moved release commit is not selected at the real stable path." >&2; exit 1; }
+        write_value previous_release "$previous_release"
+        write_value previous_commit "$previous_commit"
         write_value previous_target stable
         previous=stable
         converted=true
@@ -949,6 +982,7 @@ risk() {
         echo "::error::Cannot enter the database-risk boundary before durable quiescence." >&2; exit 1
     fi
     read_value previous_target; previous=$REPLY
+    prove_previous_identity "$previous" || { echo "::error::Selected real-directory identity changed before database risk." >&2; exit 1; }
     current=$(selected_target)
     [ "$current" = "$previous" ] || { echo "::error::Stable selection changed after quiescence." >&2; exit 1; }
     if [ "$previous" != none ]; then
@@ -975,6 +1009,7 @@ activate() {
     [ "$(cat "$transaction/risk_started")" = true ] || { echo "::error::Cannot activate before the risk boundary." >&2; exit 1; }
     [ -f "$candidate/.deploy-release" ] || { echo "::error::Candidate release metadata is missing." >&2; exit 1; }
     read_value previous_target; previous=$REPLY
+    prove_previous_identity "$previous" || { echo "::error::Selected real-directory identity changed before activation." >&2; exit 1; }
     current=$(selected_target)
     [ "$current" = "$previous" ] || { echo "::error::Stable selection changed before activation." >&2; exit 1; }
     if [ "$previous" != none ]; then
@@ -1000,19 +1035,11 @@ serve() {
         echo "usage: ... serve <app> <release> <php> [memory-limit]" >&2
         exit 2
     fi
-    local php=$1 memory=${2:-} target live_root layout
+    local php=$1 memory=${2:-} live_root
     validate_memory_limit "$memory"
     require_owner
     [ "$(cat "$transaction/activated")" = true ] || { echo "::error::Candidate is not selected." >&2; exit 1; }
-    target=$(selected_target)
-    transaction_layout || { echo "::error::Transaction has an invalid atomic layout." >&2; exit 1; }
-    layout=$REPLY
-    if [ "$layout" = stable-directory ]; then
-        [ "$target" = stable ] || { echo "::error::Selected release changed before serve." >&2; exit 1; }
-    else
-        [ "$target" = ".deployments/$app_name/releases/$release_id" ] || { echo "::error::Selected release changed before serve." >&2; exit 1; }
-    fi
-    live_root=$(release_root "$release_id") || { echo "::error::Selected candidate root is unavailable." >&2; exit 1; }
+    live_root=$(selected_candidate_root) || { echo "::error::Selected release is not the exact candidate before serve." >&2; exit 1; }
     # A trusted post-activation hook must leave the selected candidate down.
     # Re-prove that boundary immediately before the action's sole `artisan up`.
     require_maintenance "$php" "$live_root" "$memory"
@@ -1027,20 +1054,12 @@ commit_release() {
         echo "usage: ... commit <app> <release> <php> [memory-limit]" >&2
         exit 2
     fi
-    local php=$1 memory=${2:-} expected_commit recorded_commit live_root target layout
+    local php=$1 memory=${2:-} expected_commit recorded_commit live_root
     validate_memory_limit "$memory"
     require_owner
     [ "$(cat "$transaction/activated")" = true ] || { echo "::error::Candidate was not activated." >&2; exit 1; }
     [ "$(cat "$transaction/phase")" = serving ] || { echo "::error::Candidate has not completed the serving transition." >&2; exit 1; }
-    target=$(selected_target)
-    transaction_layout || { echo "::error::Transaction has an invalid atomic layout." >&2; exit 1; }
-    layout=$REPLY
-    if [ "$layout" = stable-directory ]; then
-        [ "$target" = stable ] || { echo "::error::Candidate is no longer selected." >&2; exit 1; }
-    else
-        [ "$target" = ".deployments/$app_name/releases/$release_id" ] || { echo "::error::Candidate is no longer selected." >&2; exit 1; }
-    fi
-    live_root=$(release_root "$release_id") || { echo "::error::Selected candidate root is unavailable." >&2; exit 1; }
+    live_root=$(selected_candidate_root) || { echo "::error::Candidate is no longer the exact selected release." >&2; exit 1; }
     read_value commit; expected_commit=$REPLY
     recorded_commit=$(sed -n 's/^commit=//p' "$live_root/.deploy-release" | head -1)
     [ "$recorded_commit" = "$expected_commit" ] || { echo "::error::Candidate commit metadata changed before commit." >&2; exit 1; }
@@ -1081,7 +1100,7 @@ release_lock() {
         echo "::error::Refusing to release a lock no longer owned by '$release_id'." >&2
         return 1
     fi
-    mv "$lock" "$unlock" || return 1
+    mv -T "$lock" "$unlock" || return 1
     if [ ! -f "$unlock/owner" ] || [ "$(cat "$unlock/owner")" != "$release_id" ]; then
         echo "::error::Lock ownership changed during release." >&2
         return 1
@@ -1166,7 +1185,8 @@ restore_real_previous() {
                 return 1
             fi
             write_value phase rollback_before_candidate_rename
-            mv "$stable" "$candidate"
+            mv -T "$stable" "$candidate"
+            [ "$(metadata_value "$candidate" release || true)" = "$release_id" ] || { echo "::error::Candidate identity was not retained during rollback." >&2; return 1; }
             write_value phase rollback_after_candidate_rename
             current=none
         elif [ "$prior" != none ] && [ -n "$prior_release" ] && [ "$current_release" = "$prior_release" ]; then
@@ -1174,6 +1194,7 @@ restore_real_previous() {
         elif [ "$prior" = none ] && [ "$current_release" != "$release_id" ]; then
             # Activation did not reach the first rename; the exact prior real
             # directory is still selected.
+            prove_previous_identity stable || return 1
             return 0
         else
             echo "::error::Unexpected real directory is selected during rollback." >&2
@@ -1183,7 +1204,8 @@ restore_real_previous() {
     if [ "$current" = none ] && [ "$prior" != none ]; then
         validate_release_target "$prior" || { echo "::error::Prior release target is invalid during rollback." >&2; return 1; }
         write_value phase rollback_before_prior_rename
-        mv "$HOME/$prior" "$stable"
+        mv -T "$HOME/$prior" "$stable"
+        [ "$(metadata_value "$stable" release || true)" = "$prior_release" ] || { echo "::error::Prior release identity was not restored during rollback." >&2; return 1; }
         write_value previous_target stable
         write_value phase rollback_after_prior_rename
         return 0
@@ -1217,14 +1239,8 @@ finalize() {
     read_value phase && phase=$REPLY
 
     if [ "$committed" = true ]; then
-        current=$(selected_target)
-        if [ "$layout" = stable-directory ]; then [ "$current" = stable ] || recovery_status=1
-        else [ "$current" = ".deployments/$app_name/releases/$release_id" ] || recovery_status=1; fi
-        if [ "$recovery_status" -eq 0 ]; then
-            read_value commit
-            live_root=$(release_root "$release_id" || true)
-            [ -n "$live_root" ] && [ "$(sed -n 's/^commit=//p' "$live_root/.deploy-release" | head -1)" = "$REPLY" ] || recovery_status=1
-        fi
+        live_root=$(selected_candidate_root || true)
+        [ -n "$live_root" ] || recovery_status=1
         if [ "$recovery_status" -eq 0 ]; then require_serving "$php" "$live_root" "$memory" || recovery_status=1; fi
         if [ "$recovery_status" -ne 0 ]; then echo "::error::Committed release no longer proves the exact selected, serving candidate." >&2; fi
     elif [ "$risk_started" = true ]; then
@@ -1279,7 +1295,8 @@ finalize() {
                 fi
                 [ -d "$candidate" ] && [ ! -L "$candidate" ] || recovery_status=1
                 if [ "$recovery_status" -eq 0 ]; then
-                    mv "$candidate" "$stable" || recovery_status=1
+                    mv -T "$candidate" "$stable" || recovery_status=1
+                    if [ "$recovery_status" -eq 0 ]; then selected_candidate_root >/dev/null || recovery_status=1; fi
                     current=$(selected_target)
                 fi
             fi
@@ -1328,12 +1345,17 @@ finalize() {
                 && [[ $conversion_commit =~ ^[0-9A-Fa-f]{7,64}$ ]]; then
                 if [ "$current" = none ]; then
                     validate_release_target "$conversion_target" || recovery_status=1
-                    if [ "$recovery_status" -eq 0 ]; then mv "$HOME/$conversion_target" "$stable" || recovery_status=1; fi
+                    if [ "$recovery_status" -eq 0 ]; then mv -T "$HOME/$conversion_target" "$stable" || recovery_status=1; fi
                 else
                     [ "$(metadata_value "$stable" release || true)" = "$conversion_release" ] || recovery_status=1
                     [ "$(metadata_value "$stable" commit || true)" = "$conversion_commit" ] || recovery_status=1
                 fi
-                if [ "$recovery_status" -eq 0 ]; then previous=stable; write_value previous_target stable; fi
+                if [ "$recovery_status" -eq 0 ]; then
+                    previous=stable
+                    write_value previous_release "$conversion_release"
+                    write_value previous_commit "$conversion_commit"
+                    write_value previous_target stable
+                fi
             else
                 echo "::error::Interrupted symlink conversion has no valid exact release identity." >&2
                 recovery_status=1
@@ -1342,6 +1364,7 @@ finalize() {
         current=$(selected_target)
         if [ "$previous" != none ]; then
             [ "$current" = "$previous" ] || { echo "::error::Pre-risk recovery could not prove the prior selection." >&2; recovery_status=1; }
+            if [ "$recovery_status" -eq 0 ]; then prove_previous_identity "$current" || recovery_status=1; fi
             if [ "$recovery_status" -eq 0 ]; then
                 current_root=$(root_for_target "$current" || true)
                 [ -n "$current_root" ] || recovery_status=1
