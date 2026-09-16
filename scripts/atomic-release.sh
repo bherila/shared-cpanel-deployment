@@ -169,7 +169,7 @@ transaction_layout() {
         IFS= read -r REPLY <"$transaction/layout"
     else
         # Transactions created by v2.0.x predate the layout marker.
-        REPLY=release-symlink
+        REPLY='release-symlink'
     fi
     case $REPLY in stable-directory | release-symlink) ;; *) return 1 ;; esac
 }
@@ -340,10 +340,10 @@ switch_real_directory() {
             # overwrite or delete the operator-retained copy.
             prior_target=".deployments/$app_name/releases/retained-${prior_release}-${release_id}"
         fi
-        [ ! -e "$HOME/$prior_target" ] && [ ! -L "$HOME/$prior_target" ] || {
+        if [ -e "$HOME/$prior_target" ] || [ -L "$HOME/$prior_target" ]; then
             echo "::error::Transaction-specific retained prior-release path '$prior_target' already exists." >&2
             return 1
-        }
+        fi
         write_value activation_previous_release "$prior_release"
         write_value activation_previous_target "$prior_target"
         write_value phase activating_before_prior_rename
@@ -1144,10 +1144,10 @@ restore_real_previous() {
     if [ "$current" = stable ]; then
         current_release=$(metadata_value "$stable" release || true)
         if [ "$current_release" = "$release_id" ]; then
-            [ ! -e "$candidate" ] && [ ! -L "$candidate" ] || {
+            if [ -e "$candidate" ] || [ -L "$candidate" ]; then
                 echo "::error::Candidate retention path already exists during rollback." >&2
                 return 1
-            }
+            fi
             write_value phase rollback_before_candidate_rename
             mv "$stable" "$candidate"
             write_value phase rollback_after_candidate_rename
@@ -1179,7 +1179,7 @@ finalize() {
         echo "usage: ... finalize <app> <release> <php> [memory-limit]" >&2
         exit 2
     fi
-    local php=$1 memory=${2:-} committed=false risk_started=false recovery_required=false policy=maintenance previous=none current current_root recovery_status=0 conversion_target= layout=release-symlink live_root phase=
+    local php=$1 memory=${2:-} committed=false risk_started=false recovery_required=false policy=maintenance previous=none current current_root recovery_status=0 conversion_target='' layout=release-symlink live_root phase=''
     validate_memory_limit "$memory"
     if [ ! -d "$transaction" ]; then
         if [ -f "$lock/owner" ] && [ "$(cat "$lock/owner")" = "$release_id" ]; then release_lock || true; fi
