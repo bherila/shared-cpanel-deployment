@@ -101,6 +101,26 @@ setup; make_legacy
 bash "$script" begin app missing-initial "$commit" 7200 3 maintenance '' storage >/dev/null 2>&1
 check "first conversion requires the exact existing live commit" test "$?" -eq 1
 
+# Dispatch a real failing application hook at its lifecycle position and prove
+# that finalization unlocks without downtime, cron pause or persistent conversion.
+setup; make_legacy; begin_and_upload failed-preflight
+cp "$CRONTAB_FILE" "$root/original-crontab"
+bash "$script" preflight app failed-preflight '' >/dev/null
+printf '%s\n' '#!/usr/bin/env bash' 'exec bash -c "$2"' >"$root/bin/ssh"
+chmod +x "$root/bin/ssh"
+printf '%s\n' 'exit 23' >"$root/preflight-hook.sh"
+TARGET=fixture CANDIDATE_DIR=.deployments/app/releases/failed-preflight PHP_BINARY="$php" \
+    STABLE_DIR=app SCRIPT="$root/preflight-hook.sh" bash "$here/run-preflight-hook.sh"
+check "application preflight failure propagates" test "$?" -eq 23
+check "application preflight fails before durable database risk" grep -Fqx false "$HOME/.deployments/app/state/failed-preflight/risk_started"
+check "application preflight failure leaves old code serving" test ! -e "$HOME/app/storage/framework/down"
+check "application preflight failure leaves cron unchanged" cmp -s "$CRONTAB_FILE" "$root/original-crontab"
+check "application preflight failure leaves runtime data unmoved" test ! -L "$HOME/app/storage"
+bash "$script" finalize app failed-preflight "$php" >/dev/null
+check "application preflight failure finalizer releases the app lock" test ! -e "$HOME/.deployments/app/deploy.lock"
+check "application preflight failure finalizer preserves serving state" test "$(status_field failed-preflight live_state)" = serving
+check "application preflight failure finalizer preserves cron" cmp -s "$CRONTAB_FILE" "$root/original-crontab"
+
 setup; make_legacy
 printf '%s\n' \
     '* * * * * cd "$HOME/app"&& php artisan schedule:run # JOB:app-scheduler' \
