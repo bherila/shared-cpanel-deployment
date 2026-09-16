@@ -91,7 +91,11 @@ setup; make_legacy
 bash "$script" begin app missing-initial "$commit" 7200 3 maintenance '' storage >/dev/null 2>&1
 check "first conversion requires the exact existing live commit" test "$?" -eq 1
 
-setup; make_legacy; begin_and_upload r1
+setup; make_legacy
+printf '%s\n' \
+    '* * * * * cd "$HOME/app"&& php artisan schedule:run # JOB:app-scheduler' \
+    $'* * * * * cd "$HOME/app"\t&& php artisan queue:work # JOB:app-worker' >"$CRONTAB_FILE"
+begin_and_upload r1
 ln -s app/public "$HOME/example.test"
 bash "$script" preflight app r1 example.test >"$root/preflight.out"
 check_expr "preflight reports conversion, persistence, filesystem and disk state" \
@@ -113,6 +117,7 @@ bash "$script" finalize app r1 "$php" 1G >/dev/null
 check "pre-risk recovery keeps old code selected" test "$(readlink "$HOME/app")" = "$legacy_target"
 check "pre-risk recovery restores serving state" test "$(status_field r1 live_state)" = serving
 check "pre-risk recovery restores cron" grep -Fq '# JOB:app-scheduler' "$CRONTAB_FILE"
+check "pre-risk recovery restores tab-boundary worker cron" grep -Fq '# JOB:app-worker' "$CRONTAB_FILE"
 
 setup
 bash "$script" begin app webroot-collision "$commit" 7200 3 maintenance '' storage >/dev/null
@@ -171,10 +176,17 @@ check "declared public assets are shared" test "$(readlink -f "$candidate/public
 bash "$script" finalize app files "$php" >/dev/null
 
 setup; make_legacy
-for unsafe in public public/index.php public/.htaccess public/build database/migrations app config routes resources bootstrap/app.php package.json database/database.sqlite; do
+for unsafe in public public/index.php public/.htaccess public/build database/migrations app config routes resources bootstrap/app.php package.json database/database.sqlite storage/ storage//app; do
     bash "$script" begin app "unsafe-${unsafe//\//-}" "$commit" 7200 3 maintenance "$commit" "$unsafe" >/dev/null 2>&1
     check "release-code or SQLite path '$unsafe' cannot be persistent" test "$?" -eq 2
 done
+
+setup; make_legacy; printf 'release=unrelated\ncommit=%s\n' "$commit" >"$HOME/app/.deploy-release"; begin_and_upload legacy-metadata
+bash "$script" preflight app legacy-metadata '' >/dev/null 2>&1
+check "preflight rejects reserved release metadata in a legacy application" test "$?" -ne 0
+check "reserved metadata refusal leaves legacy code selected and serving" test ! -L "$HOME/app" -a ! -e "$HOME/app/storage/framework/down"
+check "reserved metadata refusal leaves application cron untouched" grep -Fq '# JOB:app-scheduler' "$CRONTAB_FILE"
+bash "$script" finalize app legacy-metadata "$php" >/dev/null
 
 # Existing shared and live copies, dangling links, and absent paths fail closed.
 setup; make_legacy; begin_and_upload both-copies; mkdir -p "$HOME/.deployments/app/shared/storage"; : >"$HOME/.deployments/app/shared/storage/shared-only"

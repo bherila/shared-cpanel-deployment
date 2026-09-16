@@ -82,7 +82,7 @@ require_owner() {
 validate_persistent_path() {
     local path=$1
     case $path in
-        '' | . | .. | /* | .* | */.* | *..* | *[!A-Za-z0-9._/-]*) return 1 ;;
+        '' | . | .. | /* | */ | *//* | .* | */.* | *..* | *[!A-Za-z0-9._/-]*) return 1 ;;
     esac
     case $path in
         artisan | composer.json | composer.lock | package.json | package-lock.json | yarn.lock | pnpm-lock.yaml | vite.config.* | webpack.mix.js | phpunit.xml | phpunit.xml.dist | \
@@ -305,14 +305,29 @@ read_crontab() {
 filter_app_cron() {
     local source=$1 kept=$2 owned=$3
     awk \
-        -v quoted_literal='cd "$HOME/'"$app_name"'" ' \
-        -v bare_literal='cd $HOME/'"$app_name"' ' \
-        -v quoted_expanded="cd \"$HOME/$app_name\" " \
-        -v bare_expanded="cd $HOME/$app_name " \
+        -v quoted_literal='cd "$HOME/'"$app_name"'"' \
+        -v bare_literal='cd $HOME/'"$app_name" \
+        -v quoted_expanded="cd \"$HOME/$app_name\"" \
+        -v bare_expanded="cd $HOME/$app_name" \
         -v owned="$owned" \
         'BEGIN { ORS="\n" }
+         function shell_boundary(character) {
+             return character == "" || character ~ /[[:space:];&|()<>]/
+         }
+         function contains_cd(line, token, offset, relative, start, before, after) {
+             offset = 1
+             while ((relative = index(substr(line, offset), token)) != 0) {
+                 start = offset + relative - 1
+                 before = start == 1 ? "" : substr(line, start - 1, 1)
+                 after = substr(line, start + length(token), 1)
+                 if (shell_boundary(before) && shell_boundary(after)) return 1
+                 offset = start + 1
+             }
+             return 0
+         }
          {
-             belongs = index($0, quoted_literal) || index($0, bare_literal) || index($0, quoted_expanded) || index($0, bare_expanded)
+             belongs = contains_cd($0, quoted_literal) || contains_cd($0, bare_literal) ||
+                 contains_cd($0, quoted_expanded) || contains_cd($0, bare_expanded)
              if (belongs) print > owned; else print > "/dev/stdout"
          }' "$source" >"$kept"
     [ -f "$owned" ] || : >"$owned"
@@ -433,6 +448,10 @@ preflight() {
         fi
     fi
     [ "$selected" != invalid ] || { echo "::error::Stable application path has an unsupported type." >&2; exit 1; }
+    if [ "$selected" = legacy ] && { [ -e "$stable/.deploy-release" ] || [ -L "$stable/.deploy-release" ]; }; then
+        echo "::error::Legacy application contains reserved .deploy-release metadata; resolve it before atomic conversion." >&2
+        exit 1
+    fi
     case $selected in legacy) selected_root=$stable ;; none) selected_root= ;; *) selected_root="$HOME/$selected" ;; esac
 
     stable_device=$(stat -c %d "$HOME")
