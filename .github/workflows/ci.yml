@@ -48,6 +48,9 @@ jobs:
       - name: composite action phase contract
         run: bash scripts/test-action-contract.sh
 
+      - name: read-only application preflight hook harness
+        run: bash scripts/test-run-preflight-hook.sh
+
       - name: rsync-deploy.sh harness
         run: bash scripts/test-rsync-deploy.sh
 
