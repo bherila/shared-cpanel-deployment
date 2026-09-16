@@ -374,7 +374,10 @@ switch_real_directory() {
         write_value activation_previous_target "$prior_target"
         write_value phase activating_before_prior_rename
         mv -T "$stable" "$HOME/$prior_target"
-        [ ! -e "$stable" ] && [ ! -L "$stable" ] || { echo "::error::Stable path still exists after retaining prior code." >&2; return 1; }
+        if [ -e "$stable" ] || [ -L "$stable" ]; then
+            echo "::error::Stable path still exists after retaining prior code." >&2
+            return 1
+        fi
         [ "$(metadata_value "$HOME/$prior_target" release || true)" = "$prior_release" ] || { echo "::error::Retained prior release identity could not be proved." >&2; return 1; }
         write_value previous_target "$prior_target"
         write_value phase activating_after_prior_rename
