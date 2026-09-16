@@ -83,6 +83,114 @@ bash "$here/operational-audit.sh" app "$php_binary" 256M
 (cd "$HOME/app" && php artisan config:cache >/dev/null)
 bash "$here/operational-audit.sh" app "$php_binary" 256M
 (cd "$HOME/app" && php artisan config:clear >/dev/null)
+cp "$HOME/app/bootstrap/providers.php" "$scratch/original-providers"
+mkdir -p "$HOME/app/app/Services"
+cat >"$HOME/app/app/Services/AuditFacadeTarget.php" <<'PHP'
+<?php
+namespace App\Services;
+class AuditFacadeTarget { public function answer(): int { return 42; } }
+PHP
+cat >"$HOME/app/app/Providers/AuditFixtureServiceProvider.php" <<'PHP'
+<?php
+namespace App\Providers;
+class AuditFixtureServiceProvider extends \Illuminate\Support\ServiceProvider {
+    public function boot(): void {
+        $loader = \Illuminate\Foundation\AliasLoader::getInstance();
+        if (!$loader instanceof \PrivateAuditAliasLoader) { throw new \RuntimeException('unsafe alias loader'); }
+        foreach (spl_autoload_functions() ?: [] as $callback) {
+            $target = $callback instanceof \Closure ? (new \ReflectionFunction($callback))->getClosureThis() : null;
+            if ($target instanceof \Illuminate\Foundation\AliasLoader && !$target instanceof \PrivateAuditAliasLoader) {
+                throw new \RuntimeException('old alias callback remains');
+            }
+        }
+        if ((new \AuditPreexistingAlias)->answer() !== 42 || \Facades\App\Services\AuditFacadeTarget::answer() !== 42) {
+            throw new \RuntimeException('facade behavior changed');
+        }
+        if (getenv('AUDIT_INVALID_FACADE')) { $loader->load("Facades\\Invalid'Injected"); }
+    }
+}
+PHP
+cat >"$HOME/app/bootstrap/providers.php" <<'PHP'
+<?php return [App\Providers\AppServiceProvider::class, App\Providers\AuditFixtureServiceProvider::class];
+PHP
+mv "$HOME/app/vendor/autoload.php" "$HOME/app/vendor/audit-original-autoload.php"
+cat >"$HOME/app/vendor/autoload.php" <<'PHP'
+<?php
+$composer = require __DIR__.'/audit-original-autoload.php';
+Illuminate\Foundation\AliasLoader::getInstance(['AuditPreexistingAlias'=>App\Services\AuditFacadeTarget::class])->register();
+return $composer;
+PHP
+facade_hash=$("$php_binary" -r 'echo sha1("Facades\\App\\Services\\AuditFacadeTarget");')
+facade_cache="$HOME/app/storage/framework/cache/facade-$facade_hash.php"
+bash "$here/operational-audit.sh" app "$php_binary" 256M >"$scratch/normal-facade-proof"
+[ ! -e "$facade_cache" ]
+cat >"$facade_cache" <<'PHP'
+<?php
+file_put_contents(getenv('HOME').'/unsafe-bootstrap-cache', 'executed');
+shell_exec('touch '.getenv('HOME').'/unsafe-facade-descendant &');
+echo "operational-audit pending_migrations=0 queue_driver=database queue_applicability=database pending_total=777 failed_applicability=database failed_total=777\n";
+exit(0);
+PHP
+cp "$facade_cache" "$scratch/forged-facade"
+bash "$here/operational-audit.sh" app "$php_binary" 256M >"$scratch/safe-facade-proof"
+grep -Fq 'pending_total=0 failed_applicability=database failed_total=0' "$scratch/safe-facade-proof"
+cmp -s "$scratch/forged-facade" "$facade_cache"
+[ ! -e "$HOME/unsafe-bootstrap-cache" ] && [ ! -e "$HOME/unsafe-facade-descendant" ]
+if AUDIT_INVALID_FACADE=1 bash "$here/operational-audit.sh" app "$php_binary" 256M >"$scratch/invalid-facade-proof" 2>&1; then
+    echo 'Invalid facade namespace must fail without code generation' >&2; exit 1
+fi
+for cache_file in services.php packages.php routes-v7.php events.php; do
+    cache_path="$HOME/app/bootstrap/cache/$cache_file"
+    original_present=false
+    if [ -f "$cache_path" ]; then cp "$cache_path" "$scratch/original-cache"; original_present=true; fi
+    cat >"$cache_path" <<'PHP'
+<?php
+file_put_contents(getenv('HOME').'/unsafe-bootstrap-cache', 'executed');
+echo "operational-audit pending_migrations=0 queue_driver=database queue_applicability=database pending_total=777 failed_applicability=database failed_total=777\n";
+exit(0);
+PHP
+    cp "$cache_path" "$scratch/forged-cache"
+    bash "$here/operational-audit.sh" app "$php_binary" 256M >"$scratch/cache-proof"
+    grep -Fq 'pending_total=0 failed_applicability=database failed_total=0' "$scratch/cache-proof"
+    [ ! -e "$HOME/unsafe-bootstrap-cache" ]
+    cmp -s "$scratch/forged-cache" "$cache_path"
+    if [ "$original_present" = true ]; then cp "$scratch/original-cache" "$cache_path"; else rm "$cache_path"; fi
+done
+rm "$facade_cache"
+mv "$HOME/app/vendor/audit-original-autoload.php" "$HOME/app/vendor/autoload.php"
+cp "$scratch/original-providers" "$HOME/app/bootstrap/providers.php"
+rm "$HOME/app/app/Services/AuditFacadeTarget.php" "$HOME/app/app/Providers/AuditFixtureServiceProvider.php"
+
+# Laravel's actual schema:dump --prune artifact must not hide unapplied schema
+# when migration PHP files are gone. Both missing and existing-empty repositories
+# need the schema import; a nonempty applied repository with the dump is healthy.
+cp -a "$HOME/app/database/migrations" "$scratch/migrations-before-prune"
+cp "$HOME/app/storage/app/database.sqlite" "$scratch/applied-schema.sqlite"
+(cd "$HOME/app" && php artisan schema:dump --prune --no-interaction >/dev/null)
+bash "$here/operational-audit.sh" app "$php_binary" 256M >"$scratch/applied-schema-proof"
+grep -Fq 'pending_migrations=0' "$scratch/applied-schema-proof"
+cat >"$scratch/schema-audit-config.php" <<'PHP'
+<?php
+require getcwd().'/vendor/autoload.php';
+$app = require getcwd().'/bootstrap/app.php';
+$app->make(Illuminate\Contracts\Console\Kernel::class)->bootstrap();
+config(['queue.default'=>'sync', 'queue.failed.driver'=>null]);
+file_put_contents($app->getCachedConfigPath(), '<?php return '.var_export(config()->all(),true).';');
+PHP
+(cd "$HOME/app" && "$php_binary" "$scratch/schema-audit-config.php")
+(cd "$HOME/app" && "$php_binary" -r '$db = new PDO("sqlite:storage/app/database.sqlite"); foreach ($db->query("SELECT name FROM sqlite_master WHERE type=\"table\" AND name NOT LIKE \"sqlite_%\"")->fetchAll(PDO::FETCH_COLUMN) as $table) { $db->exec("DROP TABLE \"".str_replace("\"", "\"\"", $table)."\""); }')
+if bash "$here/operational-audit.sh" app "$php_binary" 256M >"$scratch/missing-schema-proof" 2>&1; then
+    echo 'Unapplied schema dump with missing repository must fail' >&2; exit 1
+fi
+(cd "$HOME/app" && "$php_binary" -r '(new PDO("sqlite:storage/app/database.sqlite"))->exec("CREATE TABLE migrations (id INTEGER PRIMARY KEY, migration TEXT, batch INTEGER)");')
+if bash "$here/operational-audit.sh" app "$php_binary" 256M >"$scratch/empty-schema-proof" 2>&1; then
+    echo 'Unapplied schema dump with empty repository must fail' >&2; exit 1
+fi
+(cd "$HOME/app" && "$php_binary" -r 'if ((new PDO("sqlite:storage/app/database.sqlite"))->query("SELECT COUNT(*) FROM migrations")->fetchColumn() != 0) exit(1);')
+cp "$scratch/applied-schema.sqlite" "$HOME/app/storage/app/database.sqlite"
+rm -rf "$HOME/app/database/schema" "$HOME/app/database/migrations"
+cp -a "$scratch/migrations-before-prune" "$HOME/app/database/migrations"
+(cd "$HOME/app" && php artisan config:clear >/dev/null)
 commit=0123456789abcdef0123456789abcdef01234567
 cp "$HOME/app/storage/app/database.sqlite" "$scratch/healthy.sqlite"
 cp "$FIXTURE_CRONTAB" "$scratch/healthy.cron"

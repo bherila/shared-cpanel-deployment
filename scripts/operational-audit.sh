@@ -27,7 +27,41 @@ ini_set('display_errors', '0');
 ini_set('log_errors', '0');
 try {
     ob_start();
+    foreach (['SERVICES', 'PACKAGES', 'ROUTES', 'EVENTS'] as $kind) {
+        $private = __DIR__.'/'.strtolower($kind).'.php';
+        putenv('APP_'.$kind.'_CACHE='.$private);
+        $_ENV['APP_'.$kind.'_CACHE'] = $_SERVER['APP_'.$kind.'_CACHE'] = $private;
+    }
     require getcwd().'/vendor/autoload.php';
+    if (class_exists(Illuminate\Foundation\AliasLoader::class)) {
+        class PrivateAuditAliasLoader extends Illuminate\Foundation\AliasLoader {
+            public function __construct(array $aliases) { $this->aliases = $aliases; }
+            protected function ensureFacadeExists($alias) {
+                if (!is_string($alias) || !preg_match('/\A[A-Za-z_][A-Za-z0-9_]*(?:\\\\[A-Za-z_][A-Za-z0-9_]*)+\z/', $alias)
+                    || !preg_match('/\A(?:[A-Za-z_][A-Za-z0-9_]*\\\\)+\z/', static::$facadeNamespace)) {
+                    throw new RuntimeException('invalid facade namespace');
+                }
+                $framework = (new ReflectionClass(Illuminate\Foundation\AliasLoader::class))->getFileName();
+                if (!is_string($framework)) { throw new RuntimeException('framework stub'); }
+                $stub = file_get_contents(dirname($framework).'/stubs/facade.stub', false, null, 0, 65537);
+                if (!is_string($stub) || strlen($stub) > 65536) { throw new RuntimeException('facade bound'); }
+                $stub = $this->formatFacadeStub($alias, $stub);
+                $path = __DIR__.'/facade-'.sha1($alias).'.php';
+                if (strlen($stub) > 65536 || file_put_contents($path, $stub) !== strlen($stub)) {
+                    throw new RuntimeException('facade write');
+                }
+                return $path;
+            }
+        }
+        $old = Illuminate\Foundation\AliasLoader::getInstance();
+        foreach (spl_autoload_functions() ?: [] as $loader) {
+            if ((is_array($loader) && ($loader[0] ?? null) === $old && ($loader[1] ?? null) === 'load')
+                || ($loader instanceof Closure && (new ReflectionFunction($loader))->getClosureThis() === $old)) {
+                if (!spl_autoload_unregister($loader)) { throw new RuntimeException('old alias loader'); }
+            }
+        }
+        Illuminate\Foundation\AliasLoader::setInstance(new PrivateAuditAliasLoader($old->getAliases()));
+    }
     $app = require getcwd().'/bootstrap/app.php';
     // Application source is trusted; generated cached PHP is data, not code.
     // Decode first, then give Laravel an immutable regenerated scalar snapshot,
@@ -127,6 +161,14 @@ try {
     $files = $migrator->getMigrationFiles($paths);
     $repository = $migrator->getRepository();
     $ran = $repository->repositoryExists() ? $repository->getRan() : [];
+    if ($ran === []) {
+        $connection = $migrator->resolveConnection(null);
+        $dump = $app->databasePath('schema/'.$connection->getName().'-schema.dump');
+        $schema = file_exists($dump) ? $dump : $app->databasePath('schema/'.$connection->getName().'-schema.sql');
+        if (!$connection instanceof Illuminate\Database\SqlServerConnection && is_file($schema)) {
+            throw new RuntimeException('unapplied stored schema');
+        }
+    }
     $pending = count(array_diff(array_keys($files), $ran));
     if ($pending !== 0) { throw new RuntimeException('pending migrations'); }
     $connectionName = config('queue.default');

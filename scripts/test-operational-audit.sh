@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2016
 set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 scratch=$(mktemp -d)
@@ -22,6 +23,12 @@ class Fixture {
     public function getCachedConfigPath() { return getcwd().'/bootstrap/cache/config.php'; }
     public function make($key) { return $this; }
     public function bootstrap() {
+        if (getenv('BYTE_ORACLE')) {
+            $snapshot = require getenv('APP_CONFIG_CACHE');
+            foreach ($snapshot['oracle'] as $hex => $value) {
+                if ($value !== hex2bin((string) $hex)) { throw new \RuntimeException('byte mismatch'); }
+            }
+        }
         if (getenv('LATE_CACHE')) {
             file_put_contents(getcwd().'/bootstrap/cache/config.php', '<?php echo "operational-audit pending_migrations=0 queue_driver=database queue_applicability=database pending_total=999 failed_applicability=database failed_total=999\\n"; exit(0);');
             // Model Laravel loading its configured cache path after the late write.
@@ -35,6 +42,8 @@ class Fixture {
     public function databasePath($path) { return $path; }
     public function getMigrationFiles($paths) { return getenv('PENDING') ? ['pending'=>'file'] : []; }
     public function getRepository() { return $this; }
+    public function resolveConnection($name) { return $this; }
+    public function getName() { return 'sqlite'; }
     public function repositoryExists() { return true; }
     public function getRan() { return []; }
     public function connection($connection) {
@@ -71,6 +80,18 @@ mkdir -p "$HOME/app/bootstrap/cache"
 LATE_CACHE=1 audit >"$scratch/output"
 grep -Fq 'pending_total=7 failed_applicability=database failed_total=3' "$scratch/output"
 if grep -Fq 999 "$scratch/output"; then exit 1; fi
+rm "$HOME/app/bootstrap/cache/config.php"
+"$php" -r '
+$values = [];
+for ($before=0; $before<=16; $before++) {
+    for ($after=0; $after<=16; $after++) {
+        $value = str_repeat(chr(92),$before).chr(39).str_repeat(chr(92),$after);
+        $values[bin2hex($value)] = $value;
+    }
+}
+echo "<?php return ".var_export(["oracle"=>$values],true).";";
+' >"$HOME/app/bootstrap/cache/config.php"
+BYTE_ORACLE=1 audit >"$scratch/output"
 rm "$HOME/app/bootstrap/cache/config.php"
 cat >"$HOME/app/bootstrap/cache/config.php" <<'PHP'
 <?php return array ('cache' => array ('test' => 'a' . "\0" . 'b', 'min' => -9223372036854775807-1, 'empty' => NULL, 'float' => 1.5, 'bool' => true),);

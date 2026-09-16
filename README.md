@@ -397,6 +397,16 @@ content is rejected without execution. Laravel loads a private regenerated snaps
 bytes, not the original cache file, preventing a validation/re-require race. No live cache is changed.
 If the original cache is absent, the private path stays absent and source configuration is loaded;
 a late-created original cache is never loaded during this audit.
+Services, packages, routes and events cache paths are also frozen to private scratch paths before
+application creation. Package/provider manifests are regenerated there from trusted candidate source
+and Composer metadata; writable original bootstrap caches are never executed or changed.
+Real-time facades preserve alias/container behavior but are regenerated from the trusted framework
+stub in private scratch files after strict PHP namespace validation; original shared storage facade
+cache PHP is never loaded. Existing registered alias callbacks are replaced without changing storage
+or other runtime paths.
+An unapplied stored schema dump also fails the migration assertion when the migration repository is
+missing or empty, even if schema pruning removed every historical PHP migration. Detection mirrors
+Laravel's default connection and `.dump`-before-`.sql` schema path selection without importing schema.
 
 For personal-site, SVC, PHR, Games and UC adoption, enable this input explicitly and retain each
 application's scheduler/worker, identity and OAuth/MCP assertions. Record aggregate outputs plus
