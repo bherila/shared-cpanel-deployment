@@ -106,6 +106,7 @@ implicit behavior change.
 | `run-migrations` | `true` | `migrate --force`, followed by an assertion that none remain pending. |
 | `migration-order` | `after-upload` | In-place compatibility only. Atomic mode always migrates the candidate and rejects `before-upload`. |
 | `artisan-commands` | — | Extra invocations after `config:cache`, e.g. `view:clear`. |
+| `preflight-script` | — | Atomic-only, read-only host prerequisite checks after built-in preflight and before either quiescence path, persistent conversion or DB risk. Gets `<candidate-path> <php> <stable-path>`; candidate environment/shared paths are not prepared yet. Empty preserves existing behavior. |
 | `quiesce-script` | — | After cron pause/old-code maintenance and before conversion or DB risk; wait for running workers here. Gets `<candidate-path> <php> <stable-path>`. |
 | `allow-unverified-quiescence` | `false` | Explicit assertion that an existing app owns no process requiring drain. Fresh installs skip this requirement. |
 | `pre-migrate-script` | — | Immediately after the durable DB-risk marker, before migration. Gets `<candidate-path> <php> <stable-path>`. |
@@ -196,6 +197,11 @@ Hook paths are safe paths relative to `$HOME`, never arbitrary absolute paths:
 
 The atomic order is:
 
+0. after upload and built-in read-only preflight, run `preflight-script <candidate> <php> <stable>`
+   when configured, before any maintenance/cron pause or persistent conversion. The hook must be
+   read-only and secret-safe: inspect prerequisite metadata, not configuration/key contents. A
+   failure aborts before database risk; the unconditional finalizer releases the transaction lock.
+   This hook is not run in in-place mode, and it cannot replace validation at the later use site;
 1. for first conversion only, pause cron, put selected old code in maintenance, run
    `quiesce-script <candidate> <php> <stable>`, and convert persistent paths;
 2. configure candidate environment, persistent Passport keys and branding;

@@ -30,6 +30,7 @@ begin=$(line_of 'name: Start the remote atomic transaction')
 capacity=$(line_of 'name: Verify remote capacity before atomic upload')
 upload=$(line_of 'name: Upload the atomic candidate')
 preflight=$(line_of 'name: Preflight the atomic conversion and host capacity')
+app_preflight=$(line_of 'name: Check application prerequisites before atomic mutation')
 conversion_quiesce=$(line_of 'name: Quiesce the selected atomic deployment')
 conversion_drain=$(line_of 'name: Drain processes before persistent conversion')
 prepare=$(line_of 'name: Prepare shared runtime paths and the atomic candidate')
@@ -52,6 +53,8 @@ commit=$(line_of 'name: Commit the verified atomic release')
 finalize=$(line_of 'name: Recover, unlock and report the atomic deployment')
 
 check "read-only preflight precedes first-conversion mutation" test "$begin" -lt "$preflight" -a "$preflight" -lt "$prepare"
+check "application preflight precedes both quiescence paths and database risk" test "$preflight" -lt "$app_preflight" -a "$app_preflight" -lt "$conversion_quiesce" -a "$app_preflight" -lt "$versioned_quiesce" -a "$app_preflight" -lt "$risk"
+check "optional application preflight is atomic-only" grep -Fq "if: inputs.deployment-mode == 'atomic' && inputs.preflight-script != ''" "$action"
 check "explicit interrupted-transaction recovery precedes a new transaction" test "$recovery" -lt "$begin"
 check "explicit recovery must prove serving before a new transaction" grep -Fq 'Interrupted transaction finalized without proving that the selected application is serving' "$action"
 check "capacity is enforced before candidate upload" test "$begin" -lt "$capacity" -a "$capacity" -lt "$upload"
