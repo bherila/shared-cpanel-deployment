@@ -213,6 +213,17 @@ validate_release_target() {
     [ -d "$HOME/$target" ] && [ ! -L "$HOME/$target" ] && [ -f "$HOME/$target/artisan" ]
 }
 
+validate_release_target_name() {
+    local target=$1 release
+    case $target in
+        ".deployments/$app_name/releases/"*) ;;
+        *) return 1 ;;
+    esac
+    release=${target##*/}
+    plain_name "$release" || return 1
+    [ "$target" = ".deployments/$app_name/releases/$release" ]
+}
+
 validate_memory_limit() {
     local memory=${1:-}
     if [ -n "$memory" ] && [ "$memory" != -1 ] && [[ ! $memory =~ ^[1-9][0-9]*[KMGkmg]$ ]]; then
@@ -815,7 +826,7 @@ prepare() {
         echo "usage: ... prepare <app> <release> <php> [memory-limit]" >&2
         exit 2
     fi
-    local php=$1 memory=${2:-} previous previous_root legacy_id legacy_target legacy_root path candidate_path converted=false status source_real destination_real layout current
+    local php=$1 memory=${2:-} previous previous_root legacy_id legacy_target legacy_root path candidate_path converted=false status source_real destination_real layout previous_release previous_commit
     validate_memory_limit "$memory"
     require_owner
     [ -f "$candidate/artisan" ] || { echo "::error::Candidate release has no artisan file after upload." >&2; exit 1; }
@@ -864,7 +875,13 @@ prepare() {
         # before each rename boundary so finalize can complete the conversion.
         previous_root=$(root_for_target "$previous") || { echo "::error::Managed symlink target is invalid." >&2; exit 1; }
         require_maintenance "$php" "$previous_root" "$memory"
+        previous_release=$(metadata_value "$previous_root" release || true)
+        previous_commit=$(metadata_value "$previous_root" commit || true)
+        [ "$previous_release" = "${previous##*/}" ] || { echo "::error::Managed symlink metadata does not match its release target." >&2; exit 1; }
+        [[ $previous_commit =~ ^[0-9A-Fa-f]{7,64}$ ]] || { echo "::error::Managed symlink release has invalid commit metadata." >&2; exit 1; }
         write_value conversion_target "$previous"
+        write_value conversion_release "$previous_release"
+        write_value conversion_commit "$previous_commit"
         write_value phase converting_symlink
         rm "$stable"
         write_value phase symlink_removed
@@ -1179,7 +1196,7 @@ finalize() {
         echo "usage: ... finalize <app> <release> <php> [memory-limit]" >&2
         exit 2
     fi
-    local php=$1 memory=${2:-} committed=false risk_started=false recovery_required=false policy=maintenance previous=none current current_root recovery_status=0 conversion_target='' layout=release-symlink live_root phase=''
+    local php=$1 memory=${2:-} committed=false risk_started=false recovery_required=false policy=maintenance previous=none current current_root recovery_status=0 conversion_target='' conversion_release='' conversion_commit='' layout=release-symlink live_root phase=''
     validate_memory_limit "$memory"
     if [ ! -d "$transaction" ]; then
         if [ -f "$lock/owner" ] && [ "$(cat "$lock/owner")" = "$release_id" ]; then release_lock || true; fi
@@ -1299,18 +1316,26 @@ finalize() {
                 previous=$current
             fi
         fi
+        current=$(selected_target)
         if [ "$layout" = stable-directory ] \
             && { [ "$phase" = converting_symlink ] || [ "$phase" = symlink_removed ]; } \
-            && [ "$(selected_target)" = none ]; then
+            && { [ "$current" = none ] || [ "$current" = stable ]; }; then
             if read_value conversion_target; then conversion_target=$REPLY; fi
-            if [ -n "$conversion_target" ] && validate_release_target "$conversion_target"; then
-                mv "$HOME/$conversion_target" "$stable" || recovery_status=1
-                if [ "$recovery_status" -eq 0 ]; then
-                    previous=stable
-                    write_value previous_target stable
+            if read_value conversion_release; then conversion_release=$REPLY; fi
+            if read_value conversion_commit; then conversion_commit=$REPLY; fi
+            if [ -n "$conversion_target" ] && validate_release_target_name "$conversion_target" \
+                && [ "$conversion_release" = "${conversion_target##*/}" ] \
+                && [[ $conversion_commit =~ ^[0-9A-Fa-f]{7,64}$ ]]; then
+                if [ "$current" = none ]; then
+                    validate_release_target "$conversion_target" || recovery_status=1
+                    if [ "$recovery_status" -eq 0 ]; then mv "$HOME/$conversion_target" "$stable" || recovery_status=1; fi
+                else
+                    [ "$(metadata_value "$stable" release || true)" = "$conversion_release" ] || recovery_status=1
+                    [ "$(metadata_value "$stable" commit || true)" = "$conversion_commit" ] || recovery_status=1
                 fi
+                if [ "$recovery_status" -eq 0 ]; then previous=stable; write_value previous_target stable; fi
             else
-                echo "::error::Interrupted symlink conversion has no valid retained release." >&2
+                echo "::error::Interrupted symlink conversion has no valid exact release identity." >&2
                 recovery_status=1
             fi
         fi
