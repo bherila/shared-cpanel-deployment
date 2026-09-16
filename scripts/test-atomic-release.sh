@@ -96,10 +96,12 @@ ln -s app/public "$HOME/example.test"
 bash "$script" preflight app r1 example.test >"$root/preflight.out"
 check_expr "preflight reports conversion, persistence, filesystem and disk state" \
     'grep -Fq "conversion_required=true" "$root/preflight.out" && grep -Fq "persistent path storage" "$root/preflight.out" && grep -Fq "filesystem device" "$root/preflight.out" && grep -Fq "Preflight disk:" "$root/preflight.out"'
-bash "$script" quiesce app r1 "$php" >/dev/null
+bash "$script" quiesce app r1 "$php" 1G >/dev/null
 check "quiesce pauses cron before conversion" test ! -s "$CRONTAB_FILE"
 check "quiesce puts old code in maintenance" test "$(status_field r1 live_state)" = maintenance
-bash "$script" prepare app r1 "$php" >/dev/null
+check "atomic lifecycle Artisan commands inherit the configured memory limit" grep -Fq -- '-d memory_limit=1G artisan down' "$PHP_LOG"
+check "Laravel maintenance probes inherit the configured memory limit" grep -Fq -- '-d memory_limit=1G -r' "$PHP_LOG"
+bash "$script" prepare app r1 "$php" 1G >/dev/null
 legacy_target=$(readlink "$HOME/app")
 check "legacy conversion keeps a managed old release selected" test "$legacy_target" != ".deployments/app/releases/r1"
 check "legacy and candidate use managed shared storage" test "$(readlink -f "$HOME/app/storage")" = "$HOME/.deployments/app/shared/storage"
@@ -107,10 +109,19 @@ check "runtime data survives first conversion" test -f "$HOME/.deployments/app/s
 check "candidate environment is copied without sharing it" test -f "$candidate/.env"
 bash "$script" begin app r2 "$commit" 1 3 maintenance '' storage >/dev/null 2>&1
 check "a concurrent deployment is refused even after its requested timeout" test "$?" -ne 0
-bash "$script" finalize app r1 "$php" >/dev/null
+bash "$script" finalize app r1 "$php" 1G >/dev/null
 check "pre-risk recovery keeps old code selected" test "$(readlink "$HOME/app")" = "$legacy_target"
 check "pre-risk recovery restores serving state" test "$(status_field r1 live_state)" = serving
 check "pre-risk recovery restores cron" grep -Fq '# JOB:app-scheduler' "$CRONTAB_FILE"
+
+setup; make_legacy; begin_and_upload before-move; preflight_quiesce before-move
+check "pre-move interruption leaves no provisional release metadata on the real stable directory" test ! -e "$HOME/app/.deploy-release"
+bash "$script" finalize app before-move "$php" >"$root/before-move-finalize.out"
+check "pre-move recovery reports the exact old commit without provisional metadata" grep -Fq "live_commit=$commit" "$root/before-move-finalize.out"
+check "standalone status retains the asserted exact legacy commit" test "$(status_field before-move live_commit)" = "$commit"
+begin_and_upload conversion-retry; preflight_quiesce conversion-retry; bash "$script" prepare app conversion-retry "$php" >/dev/null
+check "a new conversion attempt succeeds after pre-move interruption" test -L "$HOME/app"
+bash "$script" finalize app conversion-retry "$php" >/dev/null
 
 # Control and persistent path ancestors can never redirect mutations.
 setup; mkdir -p "$HOME/.deployments/app" "$root/outside"; : >"$root/outside/sentinel"; ln -s "$root/outside" "$HOME/.deployments/app/releases"
@@ -186,11 +197,67 @@ setup; make_legacy; begin_and_upload after-down; preflight_quiesce after-down; b
 check "interruption after down restores serving" test "$(status_field after-down live_state)" = serving
 check "interruption after down restores cron" grep -Fq '# JOB:app-scheduler' "$CRONTAB_FILE"
 
+setup; make_legacy
+bash "$script" begin app candidate-only "$commit" 7200 3 maintenance "$commit" storage runtime/newdata >/dev/null
+candidate="$HOME/.deployments/app/releases/candidate-only"; mkdir -p "$candidate/storage/framework" "$candidate/runtime/newdata" "$candidate/vendor" "$candidate/bootstrap"; : >"$candidate/artisan"; : >"$candidate/vendor/autoload.php"; : >"$candidate/bootstrap/app.php"
+bash "$script" preflight app candidate-only '' >/dev/null; bash "$script" quiesce app candidate-only "$php" >/dev/null; bash "$script" finalize app candidate-only "$php" >/dev/null
+check "recovery accepts a preflight-absent candidate-only persistent path before seeding" test ! -e "$HOME/app/runtime/newdata"
+check "candidate-only pre-risk recovery restores old serving state" test "$(status_field candidate-only live_state)" = serving
+
+setup; make_legacy; begin_and_upload move-before-link; preflight_quiesce move-before-link
+mv "$HOME/app/storage" "$HOME/.deployments/app/shared/storage"
+bash "$script" finalize app move-before-link "$php" >/dev/null
+check "recovery repairs a persistent link after move-before-link interruption" test "$(readlink -f "$HOME/app/storage")" = "$HOME/.deployments/app/shared/storage"
+check "move-before-link recovery preserves authoritative runtime data" test -f "$HOME/app/storage/app/live.txt"
+check "move-before-link recovery proves serving before restoring cron" test "$(status_field move-before-link live_state)" = serving
+check "move-before-link recovery restores cron only after repair" grep -Fq '# JOB:app-scheduler' "$CRONTAB_FILE"
+
+setup; make_legacy; begin_and_upload up-unproven; preflight_quiesce up-unproven; export FAIL_UP=true
+bash "$script" finalize app up-unproven "$php" >"$root/up-unproven.out" 2>/dev/null
+check "pre-risk recovery fails when serving cannot be established" test "$?" -ne 0
+check "unproven serving recovery retains its lock" test -d "$HOME/.deployments/app/deploy.lock"
+check "unproven serving recovery keeps application cron paused" test ! -s "$CRONTAB_FILE"
+export FAIL_UP=false
+
+setup; make_legacy; begin_and_upload moved-interruption; preflight_quiesce moved-interruption
+transaction="$HOME/.deployments/app/state/moved-interruption"; conversion_target=.deployments/app/releases/legacy-interrupted; legacy_root="$HOME/$conversion_target"
+mkdir -p "$HOME/.deployments/app/shared"; mv "$HOME/app/storage" "$HOME/.deployments/app/shared/storage"; ln -s "$HOME/.deployments/app/shared/storage" "$HOME/app/storage"
+mv "$HOME/app" "$legacy_root"; printf '%s\n' "$conversion_target" >"$transaction/conversion_target"; printf 'converting\n' >"$transaction/phase"; rm -f "$legacy_root/.deploy-release"
+bash "$script" finalize app moved-interruption "$php" >"$root/moved-finalize.out"
+check "interrupted conversion reselects moved old code" test "$(readlink "$HOME/app")" = "$conversion_target"
+check "interrupted conversion reconstructs exact old commit metadata" grep -Fq "commit=$commit" "$legacy_root/.deploy-release"
+check "interrupted conversion reports the exact old commit" grep -Fq "live_commit=$commit" "$root/moved-finalize.out"
+
 setup; make_legacy; : >"$HOME/app/storage/framework/down"; begin_and_upload intentional-down; bash "$script" preflight app intentional-down '' >/dev/null
 bash "$script" quiesce app intentional-down "$php" >/dev/null 2>&1
 check "intentional pre-existing maintenance is refused without mutation" test "$?" -ne 0
 check "intentional maintenance leaves cron untouched" grep -Fq '# JOB:app-scheduler' "$CRONTAB_FILE"
 bash "$script" finalize app intentional-down "$php" >/dev/null
+
+setup; make_legacy; begin_and_upload legacy-hook-up; preflight_quiesce legacy-hook-up; (cd "$HOME/app" && "$php" artisan up --no-ansi)
+bash "$script" prepare app legacy-hook-up "$php" >/dev/null 2>&1
+check "legacy conversion refuses a hook that brings old code up" test "$?" -ne 0
+check "refused legacy conversion leaves the real old directory selected" test ! -L "$HOME/app"
+bash "$script" finalize app legacy-hook-up "$php" >/dev/null
+
+setup; make_legacy; begin_and_upload establish-managed; preflight_quiesce establish-managed; bash "$script" prepare app establish-managed "$php" >/dev/null; bash "$script" finalize app establish-managed "$php" >/dev/null
+begin_and_upload versioned-hook-up; bash "$script" preflight app versioned-hook-up '' >/dev/null; bash "$script" prepare app versioned-hook-up "$php" >/dev/null; bash "$script" quiesce app versioned-hook-up "$php" >/dev/null
+(cd "$HOME/app" && "$php" artisan up --no-ansi); bash "$script" risk app versioned-hook-up "$php" >/dev/null 2>&1
+check "risk boundary refuses a hook that brings old code up" test "$?" -ne 0
+check "refused risk boundary remains pre-risk" grep -Fqx false "$HOME/.deployments/app/state/versioned-hook-up/risk_started"
+old_target=$(readlink "$HOME/app"); (cd "$HOME/app" && "$php" artisan down --no-ansi)
+ln -sfn ".deployments/app/releases/versioned-hook-up" "$HOME/app"
+bash "$script" risk app versioned-hook-up "$php" >/dev/null 2>&1
+check "risk boundary refuses a stable selection changed after quiescence" test "$?" -ne 0
+check "selection-change refusal remains pre-risk" grep -Fqx false "$HOME/.deployments/app/state/versioned-hook-up/risk_started"
+ln -sfn "$old_target" "$HOME/app"
+bash "$script" finalize app versioned-hook-up "$php" >/dev/null
+
+setup; make_legacy; begin_and_upload candidate-hook-up; preflight_quiesce candidate-hook-up; bash "$script" prepare app candidate-hook-up "$php" >/dev/null; old_target=$(readlink "$HOME/app"); bash "$script" risk app candidate-hook-up "$php" >/dev/null
+(cd "$candidate" && "$php" artisan up --no-ansi); bash "$script" activate app candidate-hook-up "$php" >/dev/null 2>&1
+check "activation refuses a candidate no longer in maintenance" test "$?" -ne 0
+check "refused activation leaves old release selected" test "$(readlink "$HOME/app")" = "$old_target"
+bash "$script" finalize app candidate-hook-up "$php" >/dev/null
 
 # A deliberately failing migration keeps exact old code selected and down.
 setup; make_legacy; begin_and_upload fail-migration; preflight_quiesce fail-migration; bash "$script" prepare app fail-migration "$php" >/dev/null
@@ -201,9 +268,15 @@ check "failed migration never selects candidate code" test "$(readlink "$HOME/ap
 check "failed migration leaves old selection in maintenance" test "$(status_field fail-migration live_state)" = maintenance
 check "failed migration keeps application cron paused" test ! -s "$CRONTAB_FILE"
 
+setup; make_legacy; begin_and_upload down-unproven; preflight_quiesce down-unproven; bash "$script" prepare app down-unproven "$php" >/dev/null; bash "$script" risk app down-unproven "$php" >/dev/null
+export FAIL_DOWN=true; bash "$script" finalize app down-unproven "$php" >"$root/down-unproven.out" 2>/dev/null
+check "risky recovery fails when maintenance cannot be re-established" test "$?" -ne 0
+check "unproven maintenance recovery retains its lock" test -d "$HOME/.deployments/app/deploy.lock"
+export FAIL_DOWN=false
+
 # Explicit rollback derives recovery from actual selection, including an interrupted activation.
 setup; make_legacy; begin_and_upload rollback-release rollback; preflight_quiesce rollback-release; bash "$script" prepare app rollback-release "$php" >/dev/null
-old_target=$(readlink "$HOME/app"); bash "$script" risk app rollback-release "$php" >/dev/null; bash "$script" activate app rollback-release >/dev/null
+old_target=$(readlink "$HOME/app"); bash "$script" risk app rollback-release "$php" >/dev/null; bash "$script" activate app rollback-release "$php" >/dev/null
 printf 'false\n' >"$HOME/.deployments/app/state/rollback-release/activated"; printf 'activating\n' >"$HOME/.deployments/app/state/rollback-release/phase"
 bash "$script" finalize app rollback-release "$php" >/dev/null
 check "rollback after activation interruption reselects prior release" test "$(readlink "$HOME/app")" = "$old_target"
@@ -211,7 +284,7 @@ check "rollback after activation interruption serves only prior release" test "$
 check "rollback restores prior cron" grep -Fq '# JOB:app-scheduler' "$CRONTAB_FILE"
 
 setup; make_legacy; begin_and_upload rollback-blocked rollback; preflight_quiesce rollback-blocked; bash "$script" prepare app rollback-blocked "$php" >/dev/null
-old_target=$(readlink "$HOME/app"); bash "$script" risk app rollback-blocked "$php" >/dev/null; bash "$script" activate app rollback-blocked >/dev/null
+old_target=$(readlink "$HOME/app"); bash "$script" risk app rollback-blocked "$php" >/dev/null; bash "$script" activate app rollback-blocked "$php" >/dev/null
 mv "$HOME/$old_target" "$root/prior-away"
 bash "$script" finalize app rollback-blocked "$php" >"$root/blocked-finalize.out" 2>/dev/null
 blocked_status=$?
@@ -220,18 +293,26 @@ check "failed rollback never brings selected candidate up" test "$(status_field 
 check_expr "failed recovery still reports exact live status" 'grep -Fq "live_release=rollback-blocked" "$root/blocked-finalize.out" && grep -Fq "live_state=maintenance" "$root/blocked-finalize.out"'
 check "failed recovery retains its lock for manual inspection" test -d "$HOME/.deployments/app/deploy.lock"
 
+setup; make_legacy; begin_and_upload rollback-up-fails rollback; preflight_quiesce rollback-up-fails; bash "$script" prepare app rollback-up-fails "$php" >/dev/null
+bash "$script" risk app rollback-up-fails "$php" >/dev/null; export FAIL_UP=true
+bash "$script" finalize app rollback-up-fails "$php" >"$root/rollback-up-fails.out" 2>/dev/null
+check "rollback fails when prior serving state is unproven" test "$?" -ne 0
+check "unproven rollback serving state retains its lock" test -d "$HOME/.deployments/app/deploy.lock"
+check "unproven rollback serving state keeps application cron paused" test ! -s "$CRONTAB_FILE"
+export FAIL_UP=false
+
 # Fresh and healthy deploys stay down through activation; unmanaged cron is restored.
 setup
 bash "$script" begin app fresh "$commit" 7200 3 maintenance '' storage >/dev/null
 candidate="$HOME/.deployments/app/releases/fresh"; mkdir -p "$candidate/storage/framework" "$candidate/vendor" "$candidate/bootstrap"; : >"$candidate/artisan"; : >"$candidate/vendor/autoload.php"; : >"$candidate/bootstrap/app.php"
-bash "$script" preflight app fresh '' >/dev/null; bash "$script" prepare app fresh "$php" >/dev/null; bash "$script" quiesce app fresh "$php" >/dev/null; bash "$script" risk app fresh "$php" >/dev/null; bash "$script" activate app fresh >/dev/null
+bash "$script" preflight app fresh '' >/dev/null; bash "$script" prepare app fresh "$php" >/dev/null; bash "$script" quiesce app fresh "$php" >/dev/null; bash "$script" risk app fresh "$php" >/dev/null; bash "$script" activate app fresh "$php" >/dev/null
 check "fresh activation remains in maintenance before post-activate work" test "$(status_field fresh live_state)" = maintenance
-bash "$script" serve app fresh "$php" >/dev/null; bash "$script" commit app fresh >/dev/null; bash "$script" finalize app fresh "$php" >/dev/null
+bash "$script" serve app fresh "$php" >/dev/null; bash "$script" commit app fresh "$php" >/dev/null; bash "$script" finalize app fresh "$php" >/dev/null
 
 setup; make_legacy; begin_and_upload healthy; preflight_quiesce healthy; bash "$script" prepare app healthy "$php" >/dev/null; bash "$script" risk app healthy "$php" >/dev/null
-bash "$script" activate app healthy >/dev/null; bash "$script" restore-cron app healthy >/dev/null; bash "$script" serve app healthy "$php" >/dev/null
+bash "$script" activate app healthy "$php" >/dev/null; bash "$script" serve app healthy "$php" >/dev/null; bash "$script" restore-cron app healthy >/dev/null
 mkdir -p "$HOME/.deployments/app/releases/pending-release" "$HOME/.deployments/app/state/pending-release"; printf 'risk\n' >"$HOME/.deployments/app/state/pending-release/phase"
-bash "$script" commit app healthy >/dev/null; bash "$script" finalize app healthy "$php" >/dev/null
+bash "$script" commit app healthy "$php" >/dev/null; bash "$script" finalize app healthy "$php" >/dev/null
 check "healthy deployment reports exact selected release" test "$(status_field healthy live_release)" = healthy
 check "healthy deployment reports exact commit" test "$(status_field healthy live_commit)" = "$commit"
 check "install-cron:false restoration preserves prior app cron" grep -Fq '# JOB:app-scheduler' "$CRONTAB_FILE"
@@ -243,12 +324,30 @@ check "later candidate preparation does not blip selected release" test ! -s "$P
 check "later candidate preparation leaves old code serving" test "$(status_field next-healthy live_state)" = serving
 bash "$script" finalize app next-healthy "$php" >/dev/null
 
+setup; make_legacy; begin_and_upload verifier-downs; preflight_quiesce verifier-downs; bash "$script" prepare app verifier-downs "$php" >/dev/null; bash "$script" risk app verifier-downs "$php" >/dev/null
+bash "$script" activate app verifier-downs "$php" >/dev/null; bash "$script" serve app verifier-downs "$php" >/dev/null; (cd "$candidate" && "$php" artisan down --no-ansi)
+bash "$script" commit app verifier-downs "$php" >/dev/null 2>&1
+check "commit refuses a verification hook that leaves the candidate down" test "$?" -ne 0
+bash "$script" finalize app verifier-downs "$php" >/dev/null
+check "uncommitted verification failure remains selected in maintenance" test "$(status_field verifier-downs live_state)" = maintenance
+
+# A post-activate hook must leave the selected candidate down for core serve.
+setup; make_legacy; begin_and_upload hook-serves; preflight_quiesce hook-serves; bash "$script" prepare app hook-serves "$php" >/dev/null; bash "$script" risk app hook-serves "$php" >/dev/null
+bash "$script" activate app hook-serves "$php" >/dev/null; (cd "$candidate" && "$php" artisan up --no-ansi)
+bash "$script" serve app hook-serves "$php" >/dev/null 2>&1
+check "serve refuses a post-activate hook that brought the candidate online" test "$?" -ne 0
+bash "$script" finalize app hook-serves "$php" >/dev/null
+check "post-activate contract violation is recovered to selected maintenance" test "$(status_field hook-serves live_state)" = maintenance
+
 # A post-activation verification failure defaults to selected candidate maintenance.
 setup; make_legacy; begin_and_upload live-check-failure; preflight_quiesce live-check-failure; bash "$script" prepare app live-check-failure "$php" >/dev/null
-bash "$script" risk app live-check-failure "$php" >/dev/null; bash "$script" activate app live-check-failure >/dev/null; bash "$script" serve app live-check-failure "$php" >/dev/null
+bash "$script" risk app live-check-failure "$php" >/dev/null; bash "$script" activate app live-check-failure "$php" >/dev/null; bash "$script" serve app live-check-failure "$php" >/dev/null
+bash "$script" restore-cron app live-check-failure >/dev/null
+check "application cron starts only after serving is proven" grep -Fq '# JOB:app-scheduler' "$CRONTAB_FILE"
 bash "$script" finalize app live-check-failure "$php" >/dev/null
 check "post-activation failure leaves candidate selected" test "$(status_field live-check-failure live_release)" = live-check-failure
 check "post-activation failure puts candidate in maintenance" test "$(status_field live-check-failure live_state)" = maintenance
+check "post-activation failure re-pauses restored application cron" test ! -s "$CRONTAB_FILE"
 
 echo "failures: $fails"
 exit "$fails"

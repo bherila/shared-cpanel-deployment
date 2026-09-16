@@ -50,9 +50,10 @@ That is a complete atomic deploy. With the defaults it:
    live `.env` forward into the candidate, and checks non-empty `APP_KEY`, `APP_ENV` and `APP_URL`;
 6. pauses this application's cron, puts the old selected release in maintenance, runs candidate
    migrations, confirms none remain pending, caches config and runs candidate checks;
-7. selects the candidate with an atomic symlink replacement, installs cron and runs post-activation
-   work while maintenance remains enabled;
-8. brings the candidate up, verifies HTTP, PHP and any application verification script, then commits
+7. selects the candidate with an atomic symlink replacement and runs post-activation work while
+   maintenance remains enabled;
+8. brings the candidate up, proves it serves, then installs/restores cron and verifies HTTP, PHP and
+   any application verification script before committing
    the release and cleans old releases;
 9. always reports which release and commit are selected and whether they are serving or in maintenance.
 
@@ -104,10 +105,9 @@ implicit behavior change.
 | `pre-migrate-script` | — | Immediately after the durable DB-risk marker, before migration. Gets `<candidate-path> <php> <stable-path>`. |
 | `post-deploy-script` | — | Atomic candidate validation before selection. In-place retains v1 after-cron timing. Same arguments. |
 | `pre-activate-script` | — | Final atomic candidate check. Gets `<candidate-path> <php> <stable-path>`. |
-| `post-activate-script` | — | Stable-path work after selection and before `artisan up`. Gets `<stable-path> <php> <candidate-path>`. |
+| `post-activate-script` | — | Stable-path work after selection and before `artisan up`. It must leave Laravel down and must not start cron/workers. Gets `<stable-path> <php> <candidate-path>`. |
 | **Cron** | | |
 | `install-cron` | `true` | |
-| `post-activate-manages-cron` | `false` | With `install-cron:false`, false restores prior lines; true requires `post-activate-script` to replace them. |
 | `cron-memory-limit` | `1G` | Applied to every managed Artisan scheduler and worker line that does not set an explicit limit. The cPanel CLI default is 128M. |
 | `scheduler-log` | `/dev/null` | Or a path inside the application, e.g. `storage/logs/scheduler.log` (appended). |
 | `cron-lines` | the scheduler line | Replaces the default. Each must `cd "$HOME/<deploy-dir>"` and end in `# JOB:<id>`. Artisan lines inherit `cron-memory-limit`. |
@@ -182,14 +182,19 @@ The atomic order is:
 4. persist the database-risk marker, then run `pre-migrate-script <candidate> <php> <stable>`;
 5. migrate, assert no pending migrations, cache config and run `artisan-commands` on the candidate;
 6. run `post-deploy-script <candidate> <php> <stable>` and `pre-activate-script` with the same args;
-7. atomically select the candidate, revalidate/create `webroot-symlink`, install or restore cron, then
-   run `post-activate-script <stable> <php> <candidate>` while maintenance is still enabled;
-8. run `artisan up`, built-in HTTP/PHP checks, then `verification-script` on the runner.
+7. re-prove old and candidate maintenance, atomically select the candidate, revalidate/create
+   `webroot-symlink`, then run `post-activate-script <stable> <php> <candidate>` while maintenance remains;
+8. run `artisan up`, prove Laravel is serving, and only then install or restore application cron;
+9. run built-in HTTP/PHP checks, then `verification-script` on the runner.
 
 The runner verification environment includes `DEPLOY_SSH_TARGET`, `DEPLOY_PHP_BINARY`, `DEPLOY_DIR`,
 `DEPLOY_STABLE_DIR`, `DEPLOY_CANDIDATE_DIR`, `DEPLOY_SITE_URL`, `DEPLOY_RELEASE_ID`,
 `DEPLOY_SOURCE_COMMIT`, `DEPLOY_LIVE_RELEASE`, `DEPLOY_LIVE_COMMIT`, `DEPLOY_LIVE_STATE` and
 `DEPLOYMENT_MODE`.
+
+`post-activate-script` is a trusted maintenance-only hook. It must not call `artisan up`, install cron,
+or start a scheduler or worker; the action re-proves maintenance when the hook returns. Express managed
+scheduled work with `cron-lines` and `extra-cron-lines`, which are installed only after serving is proven.
 
 An existing app must provide `quiesce-script` by default. The five initial consumers use it to wait for
 workers or assert that no app-owned PHP process remains. Set `allow-unverified-quiescence:true` only
@@ -294,9 +299,9 @@ an optional private branding bundle can keep that policy declarative:
           /public/branding/
 ```
 
-Set `artisan-memory-limit: 1G` when migrations or application-specific Artisan commands exceed the
-host's CLI default. The limit applies to migration execution, the pending-migration assertion,
-config caching, and every command in `artisan-commands`.
+Set `artisan-memory-limit: 1G` when the application exceeds the host's CLI default. The limit applies
+to atomic maintenance/serving probes, lifecycle `down`/`up`, migration execution, the pending-migration
+assertion, config caching, and every command in `artisan-commands`.
 
 Leave `BRANDING_SOURCE` empty for the application's default theme. When set, point it at a directory
 such as `.config/identity/branding`; keep the canonical files there rather than inside the rsync target.
@@ -306,8 +311,9 @@ such as `.config/identity/branding`; keep the canonical files there rather than 
 Before repinning, inventory every server-authoritative regular file and directory. Keep `storage` and
 add all top-level application data to `persistent-paths`; do not assume an rsync `excludes` pattern is
 a persistence declaration. Move candidate-safe validation to `post-deploy-script` or
-`pre-activate-script`, stable-path activation/import and custom cron work to `post-activate-script`, and
-live OAuth/MCP/HTTP checks to `verification-script`. Use `quiesce-script` to wait for non-cancelling
+`pre-activate-script`, stable-path activation/import work to `post-activate-script`, managed scheduled
+work to `cron-lines` or `extra-cron-lines`, and live OAuth/MCP/HTTP checks to `verification-script`.
+Use `quiesce-script` to wait for non-cancelling
 old workers after maintenance and cron pause. Add non-cancelling workflow concurrency so two runs do
 not compete before reaching the remote lock.
 

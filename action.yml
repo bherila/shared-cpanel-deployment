@@ -210,7 +210,9 @@ inputs:
     required: false
     default: ''
   post-activate-script:
-    description: Optional host script run after atomic selection while the stable path remains in maintenance. Receives <stable-path> <php> <candidate-path>.
+    description: >-
+      Optional host script run after atomic selection while the stable path remains in maintenance.
+      It must not call artisan up or start cron/workers. Receives <stable-path> <php> <candidate-path>.
     required: false
     default: ''
   quiesce-script:
@@ -238,12 +240,6 @@ inputs:
     description: Install this application's cron lines in the account crontab.
     required: false
     default: 'true'
-  post-activate-manages-cron:
-    description: >-
-      When install-cron is false, declare that post-activate-script replaces the paused application
-      cron lines. False restores the exact pre-deployment lines before serving.
-    required: false
-    default: 'false'
   cron-memory-limit:
     description: memory_limit for every managed Artisan cron line, including schedulers and workers (the CLI default on cPanel is 128M).
     required: false
@@ -313,9 +309,6 @@ runs:
         INITIAL_LIVE_COMMIT: ${{ inputs.initial-live-commit }}
         PASSPORT_KEY_DIRECTORY: ${{ inputs.passport-key-directory }}
         PERSISTENT_PATHS: ${{ inputs.persistent-paths }}
-        INSTALL_CRON: ${{ inputs.install-cron }}
-        POST_ACTIVATE_MANAGES_CRON: ${{ inputs.post-activate-manages-cron }}
-        POST_ACTIVATE_SCRIPT: ${{ inputs.post-activate-script }}
         SOURCE_COMMIT: ${{ github.sha }}
         RUN_ID: ${{ github.run_id }}
         RUN_ATTEMPT: ${{ github.run_attempt }}
@@ -324,7 +317,6 @@ runs:
           set-php-handler=${{ inputs.set-php-handler }}
           run-migrations=${{ inputs.run-migrations }}
           install-cron=${{ inputs.install-cron }}
-          post-activate-manages-cron=${{ inputs.post-activate-manages-cron }}
           allow-unverified-quiescence=${{ inputs.allow-unverified-quiescence }}
           verify-web-php=${{ inputs.verify-web-php }}
       run: |
@@ -390,12 +382,6 @@ runs:
           done <<<"$PERSISTENT_PATHS"
           [ "$covered" = true ] || {
             echo "::error::passport-key-directory must be inside a declared persistent-path in atomic mode." >&2
-            exit 2
-          }
-        fi
-        if [ "$POST_ACTIVATE_MANAGES_CRON" = true ]; then
-          [ "$DEPLOYMENT_MODE" = atomic ] && [ "$INSTALL_CRON" = false ] && [ -n "$POST_ACTIVATE_SCRIPT" ] || {
-            echo "::error::post-activate-manages-cron requires atomic mode, install-cron:false, and post-activate-script." >&2
             exit 2
           }
         fi
@@ -538,6 +524,7 @@ runs:
         TARGET: ${{ steps.ssh.outputs.target }}
         DEPLOY_DIR: ${{ inputs.deploy-dir }}
         RELEASE_ID: ${{ steps.resolve.outputs.release-id }}
+        PHP_BINARY: ${{ steps.resolve.outputs.php }}
         SOURCE_COMMIT: ${{ github.sha }}
         LOCK_TIMEOUT: ${{ inputs.deploy-lock-timeout }}
         RETAIN_RELEASES: ${{ inputs.retain-releases }}
@@ -621,9 +608,10 @@ runs:
         DEPLOY_DIR: ${{ inputs.deploy-dir }}
         RELEASE_ID: ${{ steps.resolve.outputs.release-id }}
         PHP_BINARY: ${{ steps.resolve.outputs.php }}
+        ARTISAN_MEMORY_LIMIT: ${{ inputs.artisan-memory-limit }}
       run: |
         set -euo pipefail
-        ssh "$TARGET" "bash -s -- $(printf '%q ' quiesce "$DEPLOY_DIR" "$RELEASE_ID" "$PHP_BINARY")" \
+        ssh "$TARGET" "bash -s -- $(printf '%q ' quiesce "$DEPLOY_DIR" "$RELEASE_ID" "$PHP_BINARY" "$ARTISAN_MEMORY_LIMIT")" \
           <"$GITHUB_ACTION_PATH/scripts/atomic-release.sh"
 
     - name: Drain processes before persistent conversion
@@ -648,9 +636,10 @@ runs:
         DEPLOY_DIR: ${{ inputs.deploy-dir }}
         RELEASE_ID: ${{ steps.resolve.outputs.release-id }}
         PHP_BINARY: ${{ steps.resolve.outputs.php }}
+        ARTISAN_MEMORY_LIMIT: ${{ inputs.artisan-memory-limit }}
       run: |
         set -euo pipefail
-        ssh "$TARGET" "bash -s -- $(printf '%q ' prepare "$DEPLOY_DIR" "$RELEASE_ID" "$PHP_BINARY")" \
+        ssh "$TARGET" "bash -s -- $(printf '%q ' prepare "$DEPLOY_DIR" "$RELEASE_ID" "$PHP_BINARY" "$ARTISAN_MEMORY_LIMIT")" \
           <"$GITHUB_ACTION_PATH/scripts/atomic-release.sh"
 
     - name: Upload with guarded in-place rsync
@@ -757,9 +746,10 @@ runs:
         DEPLOY_DIR: ${{ inputs.deploy-dir }}
         RELEASE_ID: ${{ steps.resolve.outputs.release-id }}
         PHP_BINARY: ${{ steps.resolve.outputs.php }}
+        ARTISAN_MEMORY_LIMIT: ${{ inputs.artisan-memory-limit }}
       run: |
         set -euo pipefail
-        ssh "$TARGET" "bash -s -- $(printf '%q ' quiesce "$DEPLOY_DIR" "$RELEASE_ID" "$PHP_BINARY")" \
+        ssh "$TARGET" "bash -s -- $(printf '%q ' quiesce "$DEPLOY_DIR" "$RELEASE_ID" "$PHP_BINARY" "$ARTISAN_MEMORY_LIMIT")" \
           <"$GITHUB_ACTION_PATH/scripts/atomic-release.sh"
 
     - name: Drain processes before the atomic risk boundary
@@ -784,9 +774,10 @@ runs:
         DEPLOY_DIR: ${{ inputs.deploy-dir }}
         RELEASE_ID: ${{ steps.resolve.outputs.release-id }}
         PHP_BINARY: ${{ steps.resolve.outputs.php }}
+        ARTISAN_MEMORY_LIMIT: ${{ inputs.artisan-memory-limit }}
       run: |
         set -euo pipefail
-        ssh "$TARGET" "bash -s -- $(printf '%q ' risk "$DEPLOY_DIR" "$RELEASE_ID" "$PHP_BINARY")" \
+        ssh "$TARGET" "bash -s -- $(printf '%q ' risk "$DEPLOY_DIR" "$RELEASE_ID" "$PHP_BINARY" "$ARTISAN_MEMORY_LIMIT")" \
           <"$GITHUB_ACTION_PATH/scripts/atomic-release.sh"
 
     - name: Run the pre-migrate script
@@ -918,9 +909,11 @@ runs:
         TARGET: ${{ steps.ssh.outputs.target }}
         DEPLOY_DIR: ${{ inputs.deploy-dir }}
         RELEASE_ID: ${{ steps.resolve.outputs.release-id }}
+        PHP_BINARY: ${{ steps.resolve.outputs.php }}
+        ARTISAN_MEMORY_LIMIT: ${{ inputs.artisan-memory-limit }}
       run: |
         set -euo pipefail
-        ssh "$TARGET" "bash -s -- $(printf '%q ' activate "$DEPLOY_DIR" "$RELEASE_ID")" \
+        ssh "$TARGET" "bash -s -- $(printf '%q ' activate "$DEPLOY_DIR" "$RELEASE_ID" "$PHP_BINARY" "$ARTISAN_MEMORY_LIMIT")" \
           <"$GITHUB_ACTION_PATH/scripts/atomic-release.sh"
 
     - name: Ensure the atomic deployment's stable webroot symlink
@@ -934,6 +927,33 @@ runs:
         set -euo pipefail
         ssh "$TARGET" "bash -s -- $(printf '%q ' "$DEPLOY_DIR" "$LINK_NAME")" \
           <"$GITHUB_ACTION_PATH/scripts/ensure-webroot-symlink.sh"
+
+    - name: Run the atomic post-activation script
+      if: inputs.deployment-mode == 'atomic' && inputs.post-activate-script != ''
+      shell: bash
+      env:
+        TARGET: ${{ steps.ssh.outputs.target }}
+        DEPLOY_DIR: ${{ inputs.deploy-dir }}
+        PHP_BINARY: ${{ steps.resolve.outputs.php }}
+        SCRIPT: ${{ inputs.post-activate-script }}
+      run: |
+        set -euo pipefail
+        [ -f "$SCRIPT" ] || { echo "::error::post-activate-script '$SCRIPT' does not exist in the checkout." >&2; exit 2; }
+        ssh "$TARGET" "bash -s -- $(printf '%q ' "$DEPLOY_DIR" "$PHP_BINARY" '${{ steps.resolve.outputs.app-dir }}')" <"$SCRIPT"
+
+    - name: Bring the selected atomic release online
+      if: inputs.deployment-mode == 'atomic'
+      shell: bash
+      env:
+        TARGET: ${{ steps.ssh.outputs.target }}
+        DEPLOY_DIR: ${{ inputs.deploy-dir }}
+        RELEASE_ID: ${{ steps.resolve.outputs.release-id }}
+        PHP_BINARY: ${{ steps.resolve.outputs.php }}
+        ARTISAN_MEMORY_LIMIT: ${{ inputs.artisan-memory-limit }}
+      run: |
+        set -euo pipefail
+        ssh "$TARGET" "bash -s -- $(printf '%q ' serve "$DEPLOY_DIR" "$RELEASE_ID" "$PHP_BINARY" "$ARTISAN_MEMORY_LIMIT")" \
+          <"$GITHUB_ACTION_PATH/scripts/atomic-release.sh"
 
     - name: Install the atomic deployment's cron lines
       if: inputs.deployment-mode == 'atomic' && inputs.install-cron == 'true'
@@ -958,7 +978,7 @@ runs:
           <"$GITHUB_ACTION_PATH/scripts/install-cron.sh"
 
     - name: Restore unmanaged atomic cron lines
-      if: inputs.deployment-mode == 'atomic' && inputs.install-cron == 'false' && inputs.post-activate-manages-cron == 'false'
+      if: inputs.deployment-mode == 'atomic' && inputs.install-cron == 'false'
       shell: bash
       env:
         TARGET: ${{ steps.ssh.outputs.target }}
@@ -967,32 +987,6 @@ runs:
       run: |
         set -euo pipefail
         ssh "$TARGET" "bash -s -- $(printf '%q ' restore-cron "$DEPLOY_DIR" "$RELEASE_ID")" \
-          <"$GITHUB_ACTION_PATH/scripts/atomic-release.sh"
-
-    - name: Run the atomic post-activation script
-      if: inputs.deployment-mode == 'atomic' && inputs.post-activate-script != ''
-      shell: bash
-      env:
-        TARGET: ${{ steps.ssh.outputs.target }}
-        DEPLOY_DIR: ${{ inputs.deploy-dir }}
-        PHP_BINARY: ${{ steps.resolve.outputs.php }}
-        SCRIPT: ${{ inputs.post-activate-script }}
-      run: |
-        set -euo pipefail
-        [ -f "$SCRIPT" ] || { echo "::error::post-activate-script '$SCRIPT' does not exist in the checkout." >&2; exit 2; }
-        ssh "$TARGET" "bash -s -- $(printf '%q ' "$DEPLOY_DIR" "$PHP_BINARY" '${{ steps.resolve.outputs.app-dir }}')" <"$SCRIPT"
-
-    - name: Bring the selected atomic release online
-      if: inputs.deployment-mode == 'atomic'
-      shell: bash
-      env:
-        TARGET: ${{ steps.ssh.outputs.target }}
-        DEPLOY_DIR: ${{ inputs.deploy-dir }}
-        RELEASE_ID: ${{ steps.resolve.outputs.release-id }}
-        PHP_BINARY: ${{ steps.resolve.outputs.php }}
-      run: |
-        set -euo pipefail
-        ssh "$TARGET" "bash -s -- $(printf '%q ' serve "$DEPLOY_DIR" "$RELEASE_ID" "$PHP_BINARY")" \
           <"$GITHUB_ACTION_PATH/scripts/atomic-release.sh"
 
     - name: Verify site health
@@ -1031,9 +1025,10 @@ runs:
         DEPLOY_DIR: ${{ inputs.deploy-dir }}
         RELEASE_ID: ${{ steps.resolve.outputs.release-id }}
         PHP_BINARY: ${{ steps.resolve.outputs.php }}
+        ARTISAN_MEMORY_LIMIT: ${{ inputs.artisan-memory-limit }}
       run: |
         set -euo pipefail
-        output=$(ssh "$TARGET" "bash -s -- $(printf '%q ' status "$DEPLOY_DIR" "$RELEASE_ID" "$PHP_BINARY")" \
+        output=$(ssh "$TARGET" "bash -s -- $(printf '%q ' status "$DEPLOY_DIR" "$RELEASE_ID" "$PHP_BINARY" "$ARTISAN_MEMORY_LIMIT")" \
           <"$GITHUB_ACTION_PATH/scripts/atomic-release.sh")
         printf '%s\n' "$output"
         for key in live_release live_commit live_state; do
@@ -1041,6 +1036,14 @@ runs:
           [ -n "$value" ] || { echo "::error::Atomic status did not report $key." >&2; exit 1; }
           echo "$key=$value" >>"$GITHUB_OUTPUT"
         done
+        observed_release=$(sed -n 's/^live_release=//p' <<<"$output" | tail -1)
+        observed_commit=$(sed -n 's/^live_commit=//p' <<<"$output" | tail -1)
+        observed_state=$(sed -n 's/^live_state=//p' <<<"$output" | tail -1)
+        if [ "${{ steps.resolve.outputs.release-id }}" != "$observed_release" ] \
+          || [ "${{ github.sha }}" != "$observed_commit" ] || [ "$observed_state" != serving ]; then
+            echo "::error::Selected atomic release is not the exact serving candidate before live verification." >&2
+            exit 1
+        fi
 
     - name: Run application-specific live verification
       if: inputs.verification-script != ''
@@ -1071,9 +1074,11 @@ runs:
         TARGET: ${{ steps.ssh.outputs.target }}
         DEPLOY_DIR: ${{ inputs.deploy-dir }}
         RELEASE_ID: ${{ steps.resolve.outputs.release-id }}
+        PHP_BINARY: ${{ steps.resolve.outputs.php }}
+        ARTISAN_MEMORY_LIMIT: ${{ inputs.artisan-memory-limit }}
       run: |
         set -euo pipefail
-        ssh "$TARGET" "bash -s -- $(printf '%q ' commit "$DEPLOY_DIR" "$RELEASE_ID")" \
+        ssh "$TARGET" "bash -s -- $(printf '%q ' commit "$DEPLOY_DIR" "$RELEASE_ID" "$PHP_BINARY" "$ARTISAN_MEMORY_LIMIT")" \
           <"$GITHUB_ACTION_PATH/scripts/atomic-release.sh"
 
     - id: atomic-finalize
@@ -1085,10 +1090,11 @@ runs:
         DEPLOY_DIR: ${{ inputs.deploy-dir }}
         RELEASE_ID: ${{ steps.resolve.outputs.release-id }}
         PHP_BINARY: ${{ steps.resolve.outputs.php }}
+        ARTISAN_MEMORY_LIMIT: ${{ inputs.artisan-memory-limit }}
       run: |
         set -uo pipefail
         status=0
-        output=$(ssh "$TARGET" "bash -s -- $(printf '%q ' finalize "$DEPLOY_DIR" "$RELEASE_ID" "$PHP_BINARY")" \
+        output=$(ssh "$TARGET" "bash -s -- $(printf '%q ' finalize "$DEPLOY_DIR" "$RELEASE_ID" "$PHP_BINARY" "$ARTISAN_MEMORY_LIMIT")" \
           <"$GITHUB_ACTION_PATH/scripts/atomic-release.sh") || status=$?
         printf '%s\n' "$output"
         for key in live_release live_commit live_state; do
