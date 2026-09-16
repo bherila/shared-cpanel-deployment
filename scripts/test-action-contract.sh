@@ -65,6 +65,8 @@ check "existing apps require an explicit quiescence policy" grep -Fq 'Existing a
 check "fresh installs never invoke the app quiesce hook" grep -Fq "steps.atomic-preflight.outputs.existing_release == 'true' && inputs.quiesce-script != ''" "$action"
 check "unmanaged cron has an explicit restoration phase" grep -Fq 'name: Restore unmanaged atomic cron lines' "$action"
 check "candidate and live release outputs are exposed" grep -Fq 'live-state:' "$action"
+check "remote atomic state machine does not require /dev/fd process substitution" sh -c \
+    '! grep -Fq '\''< <('\'' "$1"' sh "$here/scripts/atomic-release.sh"
 
 echo "failures: $fails"
 exit "$fails"
