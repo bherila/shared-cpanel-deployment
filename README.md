@@ -77,6 +77,7 @@ implicit behavior change.
 | `persistent-paths` | `storage` | Runtime files or directories shared by atomic releases; declare every server-authoritative path. |
 | `retain-releases` | `3` | Minimum 2; selected and prior releases are protected. |
 | `deploy-lock-timeout` | `21600` | Diagnostic expected duration stored with the lock. v2 never takes over an aged lock automatically. |
+| `recovery-release-id` | empty | Explicitly finalize that interrupted transaction before a new deploy, proceeding only after the selected application is proven serving. |
 | `failure-policy` | `maintenance` | `rollback` opts into serving prior code after DB changes and requires expand/contract compatibility. |
 | `initial-live-commit` | — | Exact revision required for the first conversion of an existing in-place app. |
 | **Upload** | | |

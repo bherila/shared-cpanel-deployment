@@ -43,7 +43,16 @@ printf '%s|%s\n' "$PWD" "$*" >>"$PHP_LOG"
 while [ "${1:-}" = -d ]; do shift 2; done
 [ "${1:-}" = artisan ] && shift
 case ${1:-} in
-    -r) [ -f storage/framework/down ] ;;
+    -r)
+        case ${2:-} in
+            *'Illuminate\Contracts\Console\Kernel::class'*) ;;
+            *) exit 45 ;;
+        esac
+        case ${2:-} in
+            *'->bootstrap()'*) ;;
+            *) exit 46 ;;
+        esac
+        [ -f storage/framework/down ] ;;
     down) [ "$FAIL_DOWN" != true ] || exit 43; mkdir -p storage/framework; : >storage/framework/down ;;
     up) [ "$FAIL_UP" != true ] || exit 44; rm -f storage/framework/down ;;
     migrate) [ "$FAIL_MIGRATION" != true ] || exit 42 ;;

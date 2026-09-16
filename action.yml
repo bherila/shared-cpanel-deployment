@@ -65,6 +65,13 @@ inputs:
       age; stale recovery is deliberately manual after proving the prior run and processes stopped.
     required: false
     default: '21600'
+  recovery-release-id:
+    description: >-
+      Explicit owner of an interrupted atomic transaction to finalize before starting this deployment.
+      The action proceeds only when finalization proves the selected application is serving. Leave empty
+      during normal deployments; locks are never taken over automatically.
+    required: false
+    default: ''
   failure-policy:
     description: >-
       maintenance keeps selected code down after a risky failure. rollback restores and serves the
@@ -305,6 +312,7 @@ runs:
         ARTISAN_MEMORY_LIMIT: ${{ inputs.artisan-memory-limit }}
         RETAIN_RELEASES: ${{ inputs.retain-releases }}
         LOCK_TIMEOUT: ${{ inputs.deploy-lock-timeout }}
+        RECOVERY_RELEASE_ID: ${{ inputs.recovery-release-id }}
         FAILURE_POLICY: ${{ inputs.failure-policy }}
         INITIAL_LIVE_COMMIT: ${{ inputs.initial-live-commit }}
         PASSPORT_KEY_DIRECTORY: ${{ inputs.passport-key-directory }}
@@ -365,6 +373,12 @@ runs:
         fi
         if [[ ! $LOCK_TIMEOUT =~ ^[1-9][0-9]*$ ]]; then
           echo "::error::deploy-lock-timeout must be positive seconds." >&2; exit 2
+        fi
+        if [ -n "$RECOVERY_RELEASE_ID" ]; then
+          case $RECOVERY_RELEASE_ID in
+            . | .. | .* | *[!A-Za-z0-9._-]*)
+              echo "::error::recovery-release-id must be empty or a plain release id." >&2; exit 2 ;;
+          esac
         fi
         case $FAILURE_POLICY in
           maintenance | rollback) ;;
@@ -516,6 +530,26 @@ runs:
         set -euo pipefail
         ssh "$TARGET" "bash -s -- $(printf '%q ' "$DEPLOY_DIR" "$PHP_BINARY" "$ARTISAN_MEMORY_LIMIT")" \
           <"$GITHUB_ACTION_PATH/scripts/assert-no-pending-migrations.sh"
+
+    - name: Finalize an explicitly selected interrupted transaction
+      if: inputs.deployment-mode == 'atomic' && inputs.recovery-release-id != ''
+      shell: bash
+      env:
+        TARGET: ${{ steps.ssh.outputs.target }}
+        DEPLOY_DIR: ${{ inputs.deploy-dir }}
+        RECOVERY_RELEASE_ID: ${{ inputs.recovery-release-id }}
+        PHP_BINARY: ${{ steps.resolve.outputs.php }}
+        ARTISAN_MEMORY_LIMIT: ${{ inputs.artisan-memory-limit }}
+      run: |
+        set -euo pipefail
+        output=$(ssh "$TARGET" "bash -s -- $(printf '%q ' finalize "$DEPLOY_DIR" "$RECOVERY_RELEASE_ID" "$PHP_BINARY" "$ARTISAN_MEMORY_LIMIT")" \
+          <"$GITHUB_ACTION_PATH/scripts/atomic-release.sh")
+        printf '%s\n' "$output"
+        state=$(sed -n 's/^live_state=//p' <<<"$output" | tail -1)
+        [ "$state" = serving ] || {
+          echo "::error::Interrupted transaction finalized without proving that the selected application is serving; refusing a new deployment." >&2
+          exit 1
+        }
 
     - name: Start the remote atomic transaction
       if: inputs.deployment-mode == 'atomic'
