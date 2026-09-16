@@ -9,6 +9,7 @@
 #   atomic-release.sh preflight <app> <release> <webroot-name>
 #   atomic-release.sh risk <app> <release> <php>
 #   atomic-release.sh activate <app> <release> <php>
+#   atomic-release.sh refresh-caches <app> <release> <php> <memory-limit> <artisan-command>...
 #   atomic-release.sh serve <app> <release> <php>
 #   atomic-release.sh commit <app> <release> <php>
 #   atomic-release.sh finalize <app> <release> <php>
@@ -1033,15 +1034,52 @@ activate() {
     echo "Atomically selected release $release_id; it remains in maintenance until serve."
 }
 
+refresh_caches() {
+    if [ "$#" -lt 3 ]; then
+        echo "usage: ... refresh-caches <app> <release> <php> <memory-limit> <artisan-command>..." >&2
+        exit 2
+    fi
+    local php=$1 memory=$2 live_root layout artisan_command
+    local -a argv
+    shift 2
+    validate_memory_limit "$memory"
+    require_owner
+    [ "$(cat "$transaction/activated")" = true ] || { echo "::error::Candidate is not selected." >&2; exit 1; }
+    [ "$(cat "$transaction/phase")" = activated ] || { echo "::error::Selected-release caches can only be refreshed immediately after activation." >&2; exit 1; }
+    transaction_layout || { echo "::error::Transaction has an invalid atomic layout." >&2; exit 1; }
+    layout=$REPLY
+    [ "$layout" = stable-directory ] || { echo "::error::Selected-release cache refresh is only valid for stable-directory deployments." >&2; exit 1; }
+    live_root=$(selected_candidate_root) || { echo "::error::Selected release is not the exact candidate before cache refresh." >&2; exit 1; }
+    require_maintenance "$php" "$live_root" "$memory"
+    for artisan_command in "$@"; do
+        read -r -a argv <<<"$artisan_command"
+        [ "${#argv[@]}" -gt 0 ] || { echo "::error::An empty Artisan cache command was supplied." >&2; exit 2; }
+        echo "::group::artisan $artisan_command"
+        (cd "$live_root" && run_php "$php" "$memory" artisan "${argv[@]}")
+        echo "::endgroup::"
+    done
+    # Extra commands are trusted but may not escape the maintenance boundary.
+    require_maintenance "$php" "$live_root" "$memory"
+    write_value phase caches_refreshed
+    echo "Rebuilt release caches from the final stable application path."
+}
+
 serve() {
     if [ "$#" -lt 1 ] || [ "$#" -gt 2 ]; then
         echo "usage: ... serve <app> <release> <php> [memory-limit]" >&2
         exit 2
     fi
-    local php=$1 memory=${2:-} live_root
+    local php=$1 memory=${2:-} live_root layout phase
     validate_memory_limit "$memory"
     require_owner
     [ "$(cat "$transaction/activated")" = true ] || { echo "::error::Candidate is not selected." >&2; exit 1; }
+    transaction_layout || { echo "::error::Transaction has an invalid atomic layout." >&2; exit 1; }
+    layout=$REPLY
+    read_value phase; phase=$REPLY
+    if [ "$layout" = stable-directory ] && [ "$phase" != caches_refreshed ]; then
+        echo "::error::Stable-directory caches were not rebuilt from the final selected path." >&2
+        exit 1
+    fi
     live_root=$(selected_candidate_root) || { echo "::error::Selected release is not the exact candidate before serve." >&2; exit 1; }
     # A trusted post-activation hook must leave the selected candidate down.
     # Re-prove that boundary immediately before the action's sole `artisan up`.
@@ -1407,6 +1445,7 @@ case $command in
     prepare) prepare "$@" ;;
     risk) risk "$@" ;;
     activate) activate "$@" ;;
+    refresh-caches) refresh_caches "$@" ;;
     serve) serve "$@" ;;
     restore-cron) restore_cron_command "$@" ;;
     commit) commit_release "$@" ;;

@@ -38,9 +38,11 @@ versioned_drain=$(line_of 'name: Drain processes before the atomic risk boundary
 risk=$(line_of 'name: Enter the atomic database-risk boundary')
 pre_migrate=$(line_of 'name: Run the pre-migrate script')
 migrate=$(line_of 'name: Clear config and migrate')
+candidate_cache=$(line_of 'name: Cache config and run extra Artisan commands')
 post_deploy=$(line_of 'name: Run the post-deploy script')
 pre_activate=$(line_of 'name: Run atomic pre-activation checks')
 activate=$(line_of 'name: Atomically select the candidate')
+stable_cache=$(line_of 'name: Rebuild caches from the stable atomic path')
 webroot=$(line_of "name: Ensure the atomic deployment's stable webroot symlink")
 cron=$(line_of "name: Install the atomic deployment's cron lines")
 post_activate=$(line_of 'name: Run the atomic post-activation script')
@@ -55,8 +57,14 @@ check "explicit recovery must prove serving before a new transaction" grep -Fq '
 check "capacity is enforced before candidate upload" test "$begin" -lt "$capacity" -a "$capacity" -lt "$upload"
 check "legacy worker drain precedes first-conversion mutation" test "$preflight" -lt "$conversion_quiesce" -a "$conversion_quiesce" -lt "$conversion_drain" -a "$conversion_drain" -lt "$prepare"
 check "versioned worker drain precedes durable risk and migration" test "$prepare" -lt "$versioned_quiesce" -a "$versioned_quiesce" -lt "$versioned_drain" -a "$versioned_drain" -lt "$risk" -a "$risk" -lt "$pre_migrate" -a "$pre_migrate" -lt "$migrate"
+check "candidate-path caching is disabled only for real stable-directory activation" grep -Fq "if: inputs.deployment-mode != 'atomic' || inputs.atomic-layout != 'stable-directory'" "$action"
+check "release-symlink and in-place caching retain their pre-activation order" test "$migrate" -lt "$candidate_cache" -a "$candidate_cache" -lt "$post_deploy"
 check "candidate post-deploy checks gate activation" test "$post_deploy" -lt "$pre_activate" -a "$pre_activate" -lt "$activate"
-check "stable hooks finish down and cron starts only after serving proof" test "$activate" -lt "$webroot" -a "$webroot" -lt "$post_activate" -a "$post_activate" -lt "$serve" -a "$serve" -lt "$cron" -a "$cron" -lt "$verification"
+check "stable-directory caches are rebuilt after selection and before stable-path hooks" test "$activate" -lt "$stable_cache" -a "$stable_cache" -lt "$webroot"
+check "stable-directory cache rebuild is limited to its layout" grep -Fq "if: inputs.deployment-mode == 'atomic' && inputs.atomic-layout == 'stable-directory'" "$action"
+check "cache rebuild runs through the guarded atomic state machine" grep -Fq 'refresh-caches "$DEPLOY_DIR" "$RELEASE_ID"' "$action"
+check "the atomic state machine refuses to serve before final-path caches exist" grep -Fq 'Stable-directory caches were not rebuilt from the final selected path.' "$here/scripts/atomic-release.sh"
+check "stable hooks finish down and cron starts only after serving proof" test "$stable_cache" -lt "$webroot" -a "$webroot" -lt "$post_activate" -a "$post_activate" -lt "$serve" -a "$serve" -lt "$cron" -a "$cron" -lt "$verification"
 check "live verification gates commit" test "$serve" -lt "$verification" -a "$verification" -lt "$commit"
 check "pre-verification status requires the exact serving candidate" grep -Fq 'Selected atomic release is not the exact serving candidate' "$action"
 check "commit rechecks Laravel serving state" grep -Fq 'commit "$DEPLOY_DIR" "$RELEASE_ID" "$PHP_BINARY"' "$action"
