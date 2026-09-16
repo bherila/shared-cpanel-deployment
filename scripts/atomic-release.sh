@@ -102,10 +102,10 @@ ensure_real_dir() {
     if [ ! -d "$path" ]; then
         install -d -m "$mode" "$path"
     fi
-    [ -d "$path" ] && [ ! -L "$path" ] || {
+    if [ ! -d "$path" ] || [ -L "$path" ]; then
         echo "::error::Could not establish real directory '$path'." >&2
         return 1
-    }
+    fi
 }
 
 # Refuse symlink or non-directory ancestors before any persistent-path mutation.
@@ -115,10 +115,10 @@ ensure_real_dir() {
 ensure_safe_ancestors() {
     local root=$1 relative=$2 create=${3:-false} current part parent
     current=$root
-    [ -d "$root" ] && [ ! -L "$root" ] || {
+    if [ ! -d "$root" ] || [ -L "$root" ]; then
         echo "::error::Persistent root '$root' is not a real directory." >&2
         return 1
-    }
+    fi
     parent=${relative%/*}
     [ "$parent" != "$relative" ] || return 0
     IFS=/ read -r -a parts <<<"$parent"
@@ -185,10 +185,10 @@ artisan_mode() {
 maintenance_state() {
     local php=$1 root=$2
     [ -x "$php" ] || { echo "::error::PHP binary '$php' is not executable." >&2; return 2; }
-    [ -f "$root/vendor/autoload.php" ] && [ -f "$root/bootstrap/app.php" ] || {
+    if [ ! -f "$root/vendor/autoload.php" ] || [ ! -f "$root/bootstrap/app.php" ]; then
         echo "::error::Cannot bootstrap Laravel to determine maintenance state in '$root'." >&2
         return 2
-    }
+    fi
     # This is PHP source, not shell interpolation.
     # shellcheck disable=SC2016
     (cd "$root" && "$php" -r '
@@ -216,10 +216,10 @@ switch_stable() {
         echo "::error::Refusing to select invalid release target '$target'." >&2
         return 1
     }
-    [ ! -e "$temporary" ] && [ ! -L "$temporary" ] || {
+    if [ -e "$temporary" ] || [ -L "$temporary" ]; then
         echo "::error::Temporary activation path '$temporary' already exists." >&2
         return 1
-    }
+    fi
     ln -s "$target" "$temporary"
     if [ -L "$stable" ]; then
         mv -Tf "$temporary" "$stable"
@@ -316,10 +316,10 @@ restore_cron() {
 nearest_real_parent() {
     local path=$1
     while [ ! -e "$path" ] && [ ! -L "$path" ]; do path=${path%/*}; done
-    [ -d "$path" ] && [ ! -L "$path" ] || {
+    if [ ! -d "$path" ] || [ -L "$path" ]; then
         echo "::error::Nearest existing parent '$path' is not a real directory." >&2
         return 1
-    }
+    fi
     printf '%s\n' "$path"
 }
 
@@ -360,10 +360,10 @@ preflight() {
     [ "$#" -eq 1 ] || { echo "usage: ... preflight <app> <release> <webroot-name-or-empty>" >&2; exit 2; }
     local webroot=$1 selected selected_root stable_device release_device path source shared_path shared_state type available source_device destination_parent destination_device source_real destination_real
     require_owner
-    [ -d "$candidate" ] && [ ! -L "$candidate" ] && [ -f "$candidate/artisan" ] || {
+    if [ ! -d "$candidate" ] || [ -L "$candidate" ] || [ ! -f "$candidate/artisan" ]; then
         echo "::error::Candidate release is not a real Laravel directory after upload." >&2
         exit 1
-    }
+    fi
     selected=$(selected_target)
     echo "Preflight stable selection: $selected"
     if [ "$selected" = legacy ]; then echo 'conversion_required=true'; else echo 'conversion_required=false'; fi
@@ -406,10 +406,10 @@ preflight() {
         if [ -L "$source" ]; then
             source_real=$(readlink -f "$source" || true)
             destination_real=$(readlink -f "$shared_path" || true)
-            [ -n "$source_real" ] && [ -n "$destination_real" ] && [ "$source_real" = "$destination_real" ] || {
+            if [ -z "$source_real" ] || [ -z "$destination_real" ] || [ "$source_real" != "$destination_real" ]; then
                 echo "::error::Live persistent symlink '$source' is dangling or does not resolve to '$shared_path'." >&2
                 exit 1
-            }
+            fi
         elif [ -e "$source" ]; then
             if [ -e "$shared_path" ] || [ -L "$shared_path" ]; then
                 echo "::error::Both live '$source' and managed '$shared_path' exist; refusing to choose or delete either copy." >&2
@@ -482,7 +482,7 @@ begin() {
     shift 5
     [[ $commit =~ ^[0-9A-Fa-f]{7,64}$ ]] || { echo "::error::Source commit must be a 7-64 digit hexadecimal revision." >&2; exit 2; }
     [[ $lock_seconds =~ ^[1-9][0-9]*$ ]] || { echo "::error::deploy-lock-timeout must be positive seconds." >&2; exit 2; }
-    [[ $retain =~ ^[0-9]+$ ]] && [ "$retain" -ge 2 ] || { echo "::error::retain-releases must be at least 2." >&2; exit 2; }
+    if [[ ! $retain =~ ^[0-9]+$ ]] || [ "$retain" -lt 2 ]; then echo "::error::retain-releases must be at least 2." >&2; exit 2; fi
     case $failure_policy in maintenance | rollback) ;; *) echo "::error::failure-policy must be maintenance or rollback." >&2; exit 2 ;; esac
     if [ -n "$initial_live_commit" ] && [[ ! $initial_live_commit =~ ^[0-9A-Fa-f]{7,64}$ ]]; then
         echo "::error::initial-live-commit must be empty or a 7-64 digit hexadecimal revision." >&2
@@ -560,10 +560,10 @@ link_persistent_path() {
     if [ -L "$source" ]; then
         source_real=$(readlink -f "$source" || true)
         destination_real=$(readlink -f "$destination" || true)
-        [ -n "$source_real" ] && [ -n "$destination_real" ] && [ "$source_real" = "$destination_real" ] || {
+        if [ -z "$source_real" ] || [ -z "$destination_real" ] || [ "$source_real" != "$destination_real" ]; then
             echo "::error::Persistent path '$source' is dangling or points outside its existing managed shared path." >&2
             return 1
-        }
+        fi
         return 0
     fi
     if [ ! -e "$destination" ]; then
@@ -673,7 +673,7 @@ prepare() {
             ensure_safe_ancestors "$shared" "$path" false
             if [ -d "$candidate_path" ] && [ ! -L "$candidate_path" ]; then rm -rf "$candidate_path"; fi
             if [ -f "$candidate_path" ] && [ ! -L "$candidate_path" ]; then rm -f "$candidate_path"; fi
-            [ ! -e "$candidate_path" ] && [ ! -L "$candidate_path" ] || { echo "::error::Candidate persistent path '$path' cannot be replaced safely." >&2; exit 1; }
+            if [ -e "$candidate_path" ] || [ -L "$candidate_path" ]; then echo "::error::Candidate persistent path '$path' cannot be replaced safely." >&2; exit 1; fi
             ln -s "$shared/$path" "$candidate_path"
         fi
     done <"$transaction/persistent-paths"
@@ -694,9 +694,9 @@ risk() {
     local php=$1
     require_owner
     case $(cat "$transaction/phase") in prepared | quiesced) ;; *) echo "::error::Candidate is not prepared and quiesced." >&2; exit 1 ;; esac
-    [ "$(cat "$transaction/recovery_required")" = true ] && [ "$(cat "$transaction/cron_paused")" = true ] || {
+    if [ "$(cat "$transaction/recovery_required")" != true ] || [ "$(cat "$transaction/cron_paused")" != true ]; then
         echo "::error::Cannot enter the database-risk boundary before durable quiescence." >&2; exit 1
-    }
+    fi
     # Record the irreversible boundary before the candidate command or any
     # subsequent hook is allowed to touch shared database state.
     write_value risk_started true
@@ -771,15 +771,15 @@ cleanup_releases() {
 
 release_lock() {
     local unlock="$control/.unlock-${release_id}-$$"
-    [ -f "$lock/owner" ] && [ "$(cat "$lock/owner")" = "$release_id" ] || {
+    if [ ! -f "$lock/owner" ] || [ "$(cat "$lock/owner")" != "$release_id" ]; then
         echo "::error::Refusing to release a lock no longer owned by '$release_id'." >&2
         return 1
-    }
+    fi
     mv "$lock" "$unlock" || return 1
-    [ -f "$unlock/owner" ] && [ "$(cat "$unlock/owner")" = "$release_id" ] || {
+    if [ ! -f "$unlock/owner" ] || [ "$(cat "$unlock/owner")" != "$release_id" ]; then
         echo "::error::Lock ownership changed during release." >&2
         return 1
-    }
+    fi
     rm -rf "$unlock"
 }
 
@@ -847,7 +847,7 @@ finalize() {
         # serving/cron state, including an interrupted first conversion.
         current=$(selected_target)
         if [ "$previous" = legacy ]; then
-            read_value conversion_target && conversion_target=$REPLY || true
+            if read_value conversion_target; then conversion_target=$REPLY; fi
             if [ "$current" = none ] && [ -n "$conversion_target" ] && validate_release_target "$conversion_target"; then
                 ln -s "$conversion_target" "$stable" || recovery_status=1
                 previous=$conversion_target
