@@ -883,11 +883,15 @@ commit_release() {
 }
 
 cleanup_releases() {
-    local retain live_target previous item name kept=0 pending=false
+    local retain live_target previous inventory item name kept=0 pending=false
     read_value retain; retain=$REPLY
     live_target=$(selected_target)
     read_value previous_target || REPLY=none
     previous=$REPLY
+    inventory=$(find "$releases" -mindepth 1 -maxdepth 1 -type d -printf '%T@ %f\n' | sort -nr) || {
+        echo "::error::Could not inventory retained releases." >&2
+        return 1
+    }
     while IFS= read -r item; do
         name=${item#* }
         plain_name "$name" || continue
@@ -900,7 +904,7 @@ cleanup_releases() {
             rm -rf "${releases:?}/$name"
             echo "Removed old release $name."
         fi
-    done < <(find "$releases" -mindepth 1 -maxdepth 1 -type d -printf '%T@ %f\n' | sort -nr)
+    done <<<"$inventory"
 }
 
 release_lock() {
