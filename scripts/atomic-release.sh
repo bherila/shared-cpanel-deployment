@@ -907,7 +907,11 @@ restore_cron_command() {
 preserve_cron_recovery() {
     local destination="$recovery_root/$release_id.cron" temporary
     [ -f "$transaction/cron-owned" ] || return 0
-    if [ -L "$destination" ] || { [ -e "$destination" ] && [ ! -f "$destination" ]; }; then
+    if [ -L "$destination" ]; then
+        echo "::error::Cron recovery path '$destination' has an unsafe type." >&2
+        return 1
+    fi
+    if [ -e "$destination" ] && [ ! -f "$destination" ]; then
         echo "::error::Cron recovery path '$destination' has an unsafe type." >&2
         return 1
     fi
