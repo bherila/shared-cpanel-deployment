@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# Fixture shell expressions intentionally remain literal until the fake SSH runs.
+# shellcheck disable=SC2016
 set -euo pipefail
 
 here=$(cd "$(dirname "$0")" && pwd)
