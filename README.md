@@ -53,9 +53,9 @@ That is a complete atomic deploy. With the defaults it:
 5. quiesces a legacy deployment before its one-time runtime-data move, shares `storage`, copies the
    live `.env` forward into the candidate, and checks non-empty `APP_KEY`, `APP_ENV` and `APP_URL`;
 6. pauses this application's cron, puts the old selected release in maintenance, runs candidate
-   migrations, confirms none remain pending, caches config and runs candidate checks;
-7. retains the old real application directory, renames the candidate into its stable place and runs post-activation work while
-   maintenance remains enabled;
+   migrations, confirms none remain pending, and runs candidate checks;
+7. retains the old real application directory, renames the candidate into its stable place, rebuilds
+   Laravel caches from that final path, and runs post-activation work while maintenance remains enabled;
 8. brings the candidate up, proves it serves, then installs/restores cron and verifies HTTP, PHP and
    any application verification script before committing
    the release and cleans old releases;
@@ -202,11 +202,14 @@ The atomic order is:
 3. for an already-versioned or fresh app, pause cron/old code now and run `quiesce-script`; first
    conversion remains quiesced from step 1;
 4. persist the database-risk marker, then run `pre-migrate-script <candidate> <php> <stable>`;
-5. migrate, assert no pending migrations, cache config and run `artisan-commands` on the candidate;
+5. migrate and assert no pending migrations on the candidate; for `release-symlink`, cache config and
+   run `artisan-commands` there as before;
 6. run `post-deploy-script <candidate> <php> <stable>` and `pre-activate-script` with the same args;
 7. re-prove old and candidate maintenance, retain old code and select the candidate with guarded
-   same-filesystem renames, revalidate/create
-   `webroot-symlink`, then run `post-activate-script <stable> <php> <candidate>` while maintenance remains;
+   same-filesystem renames; for `stable-directory`, rebuild config and run `artisan-commands` from the
+   final stable path so Laravel never serves absolute paths cached under the staging release path;
+   revalidate/create `webroot-symlink`, then run `post-activate-script <stable> <php> <candidate>` while
+   maintenance remains;
 8. run `artisan up`, prove Laravel is serving, and only then install or restore application cron;
 9. run built-in HTTP/PHP checks, then `verification-script` on the runner.
 

@@ -199,7 +199,9 @@ inputs:
     required: false
     default: after-upload
   artisan-commands:
-    description: Newline-separated extra artisan invocations, run after config:cache (e.g. view:clear).
+    description: >-
+      Newline-separated extra artisan invocations, run after config:cache (e.g. view:clear).
+      stable-directory runs them once from the final selected path; other layouts retain pre-activation execution.
     required: false
     default: ''
   artisan-memory-limit:
@@ -878,6 +880,7 @@ runs:
           <"$GITHUB_ACTION_PATH/scripts/assert-no-pending-migrations.sh"
 
     - name: Cache config and run extra Artisan commands
+      if: inputs.deployment-mode != 'atomic' || inputs.atomic-layout != 'stable-directory'
       shell: bash
       env:
         TARGET: ${{ steps.ssh.outputs.target }}
@@ -961,6 +964,26 @@ runs:
       run: |
         set -euo pipefail
         ssh "$TARGET" "bash -s -- $(printf '%q ' activate "$DEPLOY_DIR" "$RELEASE_ID" "$PHP_BINARY" "$ARTISAN_MEMORY_LIMIT")" \
+          <"$GITHUB_ACTION_PATH/scripts/atomic-release.sh"
+
+    - name: Rebuild caches from the stable atomic path
+      if: inputs.deployment-mode == 'atomic' && inputs.atomic-layout == 'stable-directory'
+      shell: bash
+      env:
+        TARGET: ${{ steps.ssh.outputs.target }}
+        DEPLOY_DIR: ${{ inputs.deploy-dir }}
+        RELEASE_ID: ${{ steps.resolve.outputs.release-id }}
+        PHP_BINARY: ${{ steps.resolve.outputs.php }}
+        EXTRA_COMMANDS: ${{ inputs.artisan-commands }}
+        ARTISAN_MEMORY_LIMIT: ${{ inputs.artisan-memory-limit }}
+      run: |
+        set -euo pipefail
+        commands=(config:cache)
+        while IFS= read -r line || [ -n "$line" ]; do
+          [ -z "${line//[[:space:]]/}" ] && continue
+          commands+=("$line")
+        done <<<"$EXTRA_COMMANDS"
+        ssh "$TARGET" "bash -s -- $(printf '%q ' refresh-caches "$DEPLOY_DIR" "$RELEASE_ID" "$PHP_BINARY" "$ARTISAN_MEMORY_LIMIT" "${commands[@]}")" \
           <"$GITHUB_ACTION_PATH/scripts/atomic-release.sh"
 
     - name: Ensure the atomic deployment's stable webroot symlink

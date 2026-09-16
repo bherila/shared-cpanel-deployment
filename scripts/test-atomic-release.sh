@@ -25,7 +25,7 @@ setup() {
     root=$(mktemp -d "$scratch/case.XXXXXX")
     export HOME="$root/home"
     mkdir -p "$HOME" "$root/bin"
-    export CRONTAB_FILE="$root/crontab" PHP_LOG="$root/php.log" FAIL_MIGRATION=false FAIL_DOWN=false FAIL_UP=false
+    export CRONTAB_FILE="$root/crontab" PHP_LOG="$root/php.log" FAIL_MIGRATION=false FAIL_CACHE=false FAIL_DOWN=false FAIL_UP=false
     cat >"$root/bin/crontab" <<'SH'
 #!/usr/bin/env bash
 if [ "${1:-}" = -l ]; then
@@ -56,6 +56,7 @@ case ${1:-} in
     down) [ "$FAIL_DOWN" != true ] || exit 43; mkdir -p storage/framework; : >storage/framework/down ;;
     up) [ "$FAIL_UP" != true ] || exit 44; rm -f storage/framework/down ;;
     migrate) [ "$FAIL_MIGRATION" != true ] || exit 42 ;;
+    config:cache) [ "$FAIL_CACHE" != true ] || exit 47 ;;
 esac
 SH
     chmod +x "$root/bin/crontab" "$root/bin/php"
@@ -336,6 +337,10 @@ bash "$script" begin app fresh "$commit" 7200 3 maintenance '' storage >/dev/nul
 candidate="$HOME/.deployments/app/releases/fresh"; mkdir -p "$candidate/storage/framework" "$candidate/vendor" "$candidate/bootstrap"; : >"$candidate/artisan"; : >"$candidate/vendor/autoload.php"; : >"$candidate/bootstrap/app.php"
 bash "$script" preflight app fresh '' >/dev/null; bash "$script" prepare app fresh "$php" >/dev/null; bash "$script" quiesce app fresh "$php" >/dev/null; bash "$script" risk app fresh "$php" >/dev/null; bash "$script" activate app fresh "$php" >/dev/null
 check "fresh activation remains in maintenance before post-activate work" test "$(status_field fresh live_state)" = maintenance
+symlink_log_size=$(wc -c <"$PHP_LOG")
+bash "$script" refresh-caches app fresh "$php" '' config:cache >/dev/null 2>&1
+check "release-symlink layout rejects the stable-directory cache phase" test "$?" -ne 0
+check "release-symlink rejection does not run a cache command" test "$(wc -c <"$PHP_LOG")" -eq "$symlink_log_size"
 bash "$script" serve app fresh "$php" >/dev/null; bash "$script" commit app fresh "$php" >/dev/null; bash "$script" finalize app fresh "$php" >/dev/null
 
 setup; make_legacy; begin_and_upload healthy; preflight_quiesce healthy; bash "$script" prepare app healthy "$php" >/dev/null; bash "$script" risk app healthy "$php" >/dev/null
@@ -396,6 +401,12 @@ old_real_release=$(sed -n 's/^release=//p' "$HOME/app/.deploy-release")
 bash "$script" risk app real-first "$php" >/dev/null; bash "$script" activate app real-first "$php" >/dev/null
 check_expr "real-directory activation selects candidate code beneath a real stable path" '[ -d "$HOME/app" ] && [ ! -L "$HOME/app" ]'
 check "real-directory activation retains the exact prior release" test -f "$HOME/.deployments/app/releases/$old_real_release/.deploy-release"
+bash "$script" serve app real-first "$php" >/dev/null 2>&1
+check "real-directory serving is refused before stable-path cache refresh" test "$?" -ne 0
+bash "$script" refresh-caches app real-first "$php" 1G config:cache 'view:clear' >/dev/null
+check "real-directory cache commands run from the final stable path" grep -Fq -- "$HOME/app|-d memory_limit=1G artisan config:cache" "$PHP_LOG"
+check "real-directory extra Artisan commands also run from the final stable path" grep -Fq -- "$HOME/app|-d memory_limit=1G artisan view:clear" "$PHP_LOG"
+check "real-directory cache refresh records its completed phase" grep -Fqx 'caches_refreshed' "$HOME/.deployments/app/state/real-first/phase"
 bash "$script" serve app real-first "$php" >/dev/null; bash "$script" commit app real-first "$php" >/dev/null; bash "$script" finalize app real-first "$php" >/dev/null
 check "real-directory healthy deployment reports exact selected release" test "$(status_field real-first live_release)" = real-first
 check "real-directory healthy deployment reports exact commit" test "$(status_field real-first live_commit)" = "$commit"
@@ -415,11 +426,21 @@ cp -a "$HOME/app" "$HOME/.deployments/app/releases/real-first"
 begin_and_upload_directory real-next; bash "$script" preflight app real-next '' >/dev/null; bash "$script" prepare app real-next "$php" >/dev/null
 check "later real-directory preparation leaves the selected real directory serving" test "$(status_field real-next live_state)" = serving
 bash "$script" quiesce app real-next "$php" >/dev/null; bash "$script" risk app real-next "$php" >/dev/null; bash "$script" activate app real-next "$php" >/dev/null
+bash "$script" refresh-caches app real-next "$php" '' config:cache >/dev/null
 bash "$script" serve app real-next "$php" >/dev/null; bash "$script" commit app real-next "$php" >/dev/null; bash "$script" finalize app real-next "$php" >/dev/null
 check_expr "subsequent real-directory deployment keeps the vhost ancestor real" '[ -d "$HOME/app" ] && [ ! -L "$HOME/app" ]'
 check "subsequent real-directory deployment selects exact metadata" grep -Fqx 'release=real-next' "$HOME/app/.deploy-release"
 check "hybrid recovery evidence is preserved instead of overwritten" test -d "$HOME/.deployments/app/releases/real-first"
 check "hybrid selected directory is retained at a unique transaction path" test -d "$HOME/.deployments/app/releases/retained-real-first-real-next"
+
+setup; make_legacy; begin_and_upload_directory real-cache-failure; preflight_quiesce real-cache-failure; bash "$script" prepare app real-cache-failure "$php" >/dev/null
+bash "$script" risk app real-cache-failure "$php" >/dev/null; bash "$script" activate app real-cache-failure "$php" >/dev/null; export FAIL_CACHE=true
+bash "$script" refresh-caches app real-cache-failure "$php" '' config:cache >/dev/null 2>&1
+check "a failed stable-path cache rebuild fails the deployment phase" test "$?" -eq 47
+check "a failed stable-path cache rebuild does not advance its durable phase" grep -Fqx 'activated' "$HOME/.deployments/app/state/real-cache-failure/phase"
+export FAIL_CACHE=false; bash "$script" finalize app real-cache-failure "$php" >/dev/null
+check "cache rebuild failure leaves the exact candidate selected in maintenance" test "$(status_field real-cache-failure live_release)" = real-cache-failure -a "$(status_field real-cache-failure live_state)" = maintenance
+check "cache rebuild failure leaves application cron paused" test ! -s "$CRONTAB_FILE"
 
 setup; make_legacy; begin_and_upload_directory real-pre-risk; preflight_quiesce real-pre-risk; bash "$script" prepare app real-pre-risk "$php" >/dev/null
 bash "$script" finalize app real-pre-risk "$php" >/dev/null
@@ -467,6 +488,7 @@ check "rollback commit mismatch never runs artisan up" sh -c '! grep -Fq "artisa
 check_expr "rollback commit mismatch keeps cron paused and retains its lock" '[ ! -s "$CRONTAB_FILE" ] && [ -d "$HOME/.deployments/app/deploy.lock" ]'
 
 setup; make_legacy; begin_and_upload_directory real-candidate-tamper; preflight_quiesce real-candidate-tamper; bash "$script" prepare app real-candidate-tamper "$php" >/dev/null; bash "$script" risk app real-candidate-tamper "$php" >/dev/null; bash "$script" activate app real-candidate-tamper "$php" >/dev/null
+bash "$script" refresh-caches app real-candidate-tamper "$php" '' config:cache >/dev/null
 transaction="$HOME/.deployments/app/state/real-candidate-tamper"; prior_target=$(cat "$transaction/previous_target"); mv -T "$HOME/app" "$candidate"; mv -T "$HOME/$prior_target" "$HOME/app"; : >"$PHP_LOG"
 bash "$script" serve app real-candidate-tamper "$php" >/dev/null 2>&1
 check "serve rejects an off-live exact candidate when stable selects another managed release" test "$?" -ne 0

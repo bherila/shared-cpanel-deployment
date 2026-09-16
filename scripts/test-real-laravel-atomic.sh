@@ -21,6 +21,29 @@ if [ ! -f "$HOME/app/.env" ]; then
 fi
 (cd "$HOME/app" && php artisan key:generate --no-interaction --no-ansi >/dev/null)
 
+# Laravel's serialized config includes absolute application paths. Reproduce
+# the stable-directory rename and prove that caching again from the final path
+# removes every staging-path reference.
+staging="$HOME/.deployments/app/releases/cache-path-fixture"
+mkdir -p "$(dirname "$staging")"
+mv "$HOME/app" "$staging"
+(cd "$staging" && php artisan config:cache --no-interaction --no-ansi >/dev/null)
+grep -Fq -- "$staging" "$staging/bootstrap/cache/config.php" || {
+    echo "expected Laravel's candidate-built config cache to contain the staging path" >&2
+    exit 1
+}
+mv "$staging" "$HOME/app"
+(cd "$HOME/app" && php artisan config:clear --no-interaction --no-ansi >/dev/null)
+(cd "$HOME/app" && php artisan config:cache --no-interaction --no-ansi >/dev/null)
+if grep -Fq -- "$staging" "$HOME/app/bootstrap/cache/config.php"; then
+    echo "stable-path config cache retained a staging-path reference" >&2
+    exit 1
+fi
+grep -Fq -- "$HOME/app" "$HOME/app/bootstrap/cache/config.php" || {
+    echo "expected Laravel's rebuilt config cache to contain the stable path" >&2
+    exit 1
+}
+
 serving=$(bash "$here/atomic-release.sh" status app fixture "$php_binary" | sed -n 's/^live_state=//p' | head -1)
 [ "$serving" = serving ] || { echo "expected real Laravel to report serving, got '$serving'" >&2; exit 1; }
 
