@@ -53,6 +53,7 @@ control="$HOME/.deployments/$app_name"
 releases="$control/releases"
 shared="$control/shared"
 state_root="$control/state"
+recovery_root="$control/recovery"
 transaction="$state_root/$release_id"
 lock="$control/deploy.lock"
 stable="$HOME/$app_name"
@@ -486,6 +487,10 @@ preflight() {
 
     if [ -n "$webroot" ]; then
         plain_name "$webroot" || { echo "::error::webroot-symlink must be a plain account-home name." >&2; exit 2; }
+        [ "$webroot" != "$app_name" ] || {
+            echo "::error::webroot-symlink must not equal deploy-dir; that would replace the stable release link." >&2
+            exit 2
+        }
         if [ -L "$HOME/$webroot" ]; then
             echo "Preflight webroot: ~/$webroot -> $(readlink "$HOME/$webroot") (resolved $(readlink -f "$HOME/$webroot"))."
         elif [ -e "$HOME/$webroot" ]; then
@@ -557,6 +562,7 @@ begin() {
     ensure_real_dir "$releases"
     ensure_real_dir "$shared"
     ensure_real_dir "$state_root"
+    ensure_real_dir "$recovery_root"
 
     local now acquired=false
     now=$(date +%s)
@@ -654,7 +660,10 @@ link_persistent_path() {
 }
 
 quiesce() {
-    [ "$#" -ge 1 ] && [ "$#" -le 2 ] || { echo "usage: ... quiesce <app> <release> <php> [memory-limit]" >&2; exit 2; }
+    if [ "$#" -lt 1 ] || [ "$#" -gt 2 ]; then
+        echo "usage: ... quiesce <app> <release> <php> [memory-limit]" >&2
+        exit 2
+    fi
     local php=$1 memory=${2:-} previous root state=0
     validate_memory_limit "$memory"
     require_owner
@@ -684,7 +693,10 @@ quiesce() {
 }
 
 prepare() {
-    [ "$#" -ge 1 ] && [ "$#" -le 2 ] || { echo "usage: ... prepare <app> <release> <php> [memory-limit]" >&2; exit 2; }
+    if [ "$#" -lt 1 ] || [ "$#" -gt 2 ]; then
+        echo "usage: ... prepare <app> <release> <php> [memory-limit]" >&2
+        exit 2
+    fi
     local php=$1 memory=${2:-} previous legacy_id legacy_target legacy_root path candidate_path converted=false status source_real destination_real
     validate_memory_limit "$memory"
     require_owner
@@ -764,7 +776,10 @@ prepare() {
 }
 
 risk() {
-    [ "$#" -ge 1 ] && [ "$#" -le 2 ] || { echo "usage: ... risk <app> <release> <php> [memory-limit]" >&2; exit 2; }
+    if [ "$#" -lt 1 ] || [ "$#" -gt 2 ]; then
+        echo "usage: ... risk <app> <release> <php> [memory-limit]" >&2
+        exit 2
+    fi
     local php=$1 memory=${2:-} previous current
     validate_memory_limit "$memory"
     require_owner
@@ -786,7 +801,10 @@ risk() {
 }
 
 activate() {
-    [ "$#" -ge 1 ] && [ "$#" -le 2 ] || { echo "usage: ... activate <app> <release> <php> [memory-limit]" >&2; exit 2; }
+    if [ "$#" -lt 1 ] || [ "$#" -gt 2 ]; then
+        echo "usage: ... activate <app> <release> <php> [memory-limit]" >&2
+        exit 2
+    fi
     local php=$1 memory=${2:-} previous current
     validate_memory_limit "$memory"
     require_owner
@@ -805,7 +823,10 @@ activate() {
 }
 
 serve() {
-    [ "$#" -ge 1 ] && [ "$#" -le 2 ] || { echo "usage: ... serve <app> <release> <php> [memory-limit]" >&2; exit 2; }
+    if [ "$#" -lt 1 ] || [ "$#" -gt 2 ]; then
+        echo "usage: ... serve <app> <release> <php> [memory-limit]" >&2
+        exit 2
+    fi
     local php=$1 memory=${2:-} target
     validate_memory_limit "$memory"
     require_owner
@@ -822,7 +843,10 @@ serve() {
 }
 
 commit_release() {
-    [ "$#" -ge 1 ] && [ "$#" -le 2 ] || { echo "usage: ... commit <app> <release> <php> [memory-limit]" >&2; exit 2; }
+    if [ "$#" -lt 1 ] || [ "$#" -gt 2 ]; then
+        echo "usage: ... commit <app> <release> <php> [memory-limit]" >&2
+        exit 2
+    fi
     local php=$1 memory=${2:-} expected_commit recorded_commit
     validate_memory_limit "$memory"
     require_owner
@@ -880,6 +904,20 @@ restore_cron_command() {
     echo "Restored the application's pre-deployment cron lines."
 }
 
+preserve_cron_recovery() {
+    local destination="$recovery_root/$release_id.cron" temporary
+    [ -f "$transaction/cron-owned" ] || return 0
+    if [ -L "$destination" ] || { [ -e "$destination" ] && [ ! -f "$destination" ]; }; then
+        echo "::error::Cron recovery path '$destination' has an unsafe type." >&2
+        return 1
+    fi
+    temporary=$(mktemp "$recovery_root/.${release_id}.cron.XXXXXX")
+    cp "$transaction/cron-owned" "$temporary"
+    chmod 600 "$temporary"
+    mv -f "$temporary" "$destination"
+    echo "Preserved paused application cron for manual recovery at '$destination'."
+}
+
 repair_previous_persistence() {
     local root=$1 path source destination source_real destination_real original
     while IFS= read -r path || [ -n "$path" ]; do
@@ -920,7 +958,10 @@ repair_previous_persistence() {
 }
 
 finalize() {
-    [ "$#" -ge 1 ] && [ "$#" -le 2 ] || { echo "usage: ... finalize <app> <release> <php> [memory-limit]" >&2; exit 2; }
+    if [ "$#" -lt 1 ] || [ "$#" -gt 2 ]; then
+        echo "usage: ... finalize <app> <release> <php> [memory-limit]" >&2
+        exit 2
+    fi
     local php=$1 memory=${2:-} committed=false risk_started=false recovery_required=false policy=maintenance previous=none current recovery_status=0 conversion_target=
     validate_memory_limit "$memory"
     if [ ! -d "$transaction" ]; then
@@ -978,6 +1019,7 @@ finalize() {
                 fi
             fi
             pause_cron || { echo "::error::Could not keep application cron paused." >&2; recovery_status=1; }
+            if [ "$recovery_status" -eq 0 ]; then preserve_cron_recovery || recovery_status=1; fi
             echo "Deployment failed after the risk boundary; selected code remains in maintenance."
             if [ "$previous" != none ]; then
                 echo "After confirming schema compatibility, restore with: ln -sfn '$previous' '$stable' && cd '$stable' && '$php' artisan up"

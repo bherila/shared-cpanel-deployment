@@ -114,6 +114,13 @@ check "pre-risk recovery keeps old code selected" test "$(readlink "$HOME/app")"
 check "pre-risk recovery restores serving state" test "$(status_field r1 live_state)" = serving
 check "pre-risk recovery restores cron" grep -Fq '# JOB:app-scheduler' "$CRONTAB_FILE"
 
+setup
+bash "$script" begin app webroot-collision "$commit" 7200 3 maintenance '' storage >/dev/null
+candidate="$HOME/.deployments/app/releases/webroot-collision"; mkdir -p "$candidate/storage"; : >"$candidate/artisan"
+bash "$script" preflight app webroot-collision app >/dev/null 2>&1
+check "preflight rejects a webroot name equal to the stable application path" test "$?" -eq 2
+bash "$script" finalize app webroot-collision "$php" >/dev/null
+
 setup; make_legacy; begin_and_upload before-move; preflight_quiesce before-move
 check "pre-move interruption leaves no provisional release metadata on the real stable directory" test ! -e "$HOME/app/.deploy-release"
 bash "$script" finalize app before-move "$php" >"$root/before-move-finalize.out"
@@ -267,6 +274,7 @@ bash "$script" finalize app fail-migration "$php" >"$root/finalize.out"
 check "failed migration never selects candidate code" test "$(readlink "$HOME/app")" = "$old_target"
 check "failed migration leaves old selection in maintenance" test "$(status_field fail-migration live_state)" = maintenance
 check "failed migration keeps application cron paused" test ! -s "$CRONTAB_FILE"
+check "failed migration preserves paused cron for manual recovery" grep -Fq '# JOB:app-scheduler' "$HOME/.deployments/app/recovery/fail-migration.cron"
 
 setup; make_legacy; begin_and_upload down-unproven; preflight_quiesce down-unproven; bash "$script" prepare app down-unproven "$php" >/dev/null; bash "$script" risk app down-unproven "$php" >/dev/null
 export FAIL_DOWN=true; bash "$script" finalize app down-unproven "$php" >"$root/down-unproven.out" 2>/dev/null

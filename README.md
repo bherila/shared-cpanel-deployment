@@ -211,7 +211,9 @@ paused, old code is down, and the worker-drain hook passed. From that point unti
 and `artisan up`, no release is intentionally served. A failed or partially applied migration under
 the default `failure-policy: maintenance` leaves
 the **old selected release** in maintenance. A failure after selection leaves the candidate selected in
-maintenance. Selection and service state are always reported separately.
+maintenance. The paused application cron lines are preserved privately under
+`~/.deployments/<deploy-dir>/recovery/<release-id>.cron` for manual recovery, even after the deployment
+transaction unlocks. Selection and service state are always reported separately.
 
 `failure-policy: rollback` restores the prior stable symlink, prior app cron lines and serving state.
 It does not and cannot roll back the database. Use it only when every migration in the release follows
