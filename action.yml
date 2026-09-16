@@ -208,6 +208,14 @@ inputs:
     description: Optional PHP CLI memory_limit applied to migrations and every Artisan command, e.g. 1G.
     required: false
     default: ''
+  preflight-script:
+    description: >-
+      Optional read-only host script receiving <candidate-path> <php> <stable-path>. Atomic mode runs
+      it after built-in preflight, before any quiescence, persistent conversion or database risk.
+      Check static prerequisites here; the candidate environment and shared paths are not prepared yet.
+      In-place mode does not run this hook.
+    required: false
+    default: ''
   pre-migrate-script:
     description: >-
       Optional host script receiving <app-path> <php> [stable-path]. Atomic mode runs it immediately
@@ -648,6 +656,17 @@ runs:
           echo "::error::Existing atomic deployments require quiesce-script, or explicit allow-unverified-quiescence:true." >&2
           exit 2
         fi
+
+    - name: Check application prerequisites before atomic mutation
+      if: inputs.deployment-mode == 'atomic' && inputs.preflight-script != ''
+      shell: bash
+      env:
+        TARGET: ${{ steps.ssh.outputs.target }}
+        CANDIDATE_DIR: ${{ steps.resolve.outputs.app-dir }}
+        PHP_BINARY: ${{ steps.resolve.outputs.php }}
+        STABLE_DIR: ${{ inputs.deploy-dir }}
+        SCRIPT: ${{ inputs.preflight-script }}
+      run: bash "$GITHUB_ACTION_PATH/scripts/run-preflight-hook.sh"
 
     - name: Quiesce the selected atomic deployment
       if: inputs.deployment-mode == 'atomic' && steps.atomic-preflight.outputs.conversion_required == 'true'
