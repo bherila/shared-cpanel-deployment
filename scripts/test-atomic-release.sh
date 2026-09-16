@@ -378,5 +378,122 @@ check "post-activation failure leaves candidate selected" test "$(status_field l
 check "post-activation failure puts candidate in maintenance" test "$(status_field live-check-failure live_state)" = maintenance
 check "post-activation failure re-pauses restored application cron" test ! -s "$CRONTAB_FILE"
 
+# The cPanel-compatible layout keeps the vhost application path real. Its two
+# activation renames are durably recoverable, and v2.0 symlink deployments can
+# migrate without changing the selected code or persistent state.
+begin_and_upload_directory() {
+    local release=$1 policy=${2:-maintenance} initial=''
+    [ -d "$HOME/app" ] && [ ! -L "$HOME/app" ] && [ ! -f "$HOME/app/.deploy-release" ] && initial=$commit
+    bash "$script" begin app "$release" "$commit" 7200 3 "$policy" "$initial" stable-directory storage >/dev/null
+    candidate="$HOME/.deployments/app/releases/$release"
+    mkdir -p "$candidate/storage/framework" "$candidate/storage/app" "$candidate/public" "$candidate/vendor" "$candidate/bootstrap"
+    : >"$candidate/artisan"; : >"$candidate/vendor/autoload.php"; : >"$candidate/bootstrap/app.php"
+}
+
+setup; make_legacy; begin_and_upload_directory real-first; preflight_quiesce real-first; bash "$script" prepare app real-first "$php" >/dev/null
+check_expr "real-directory first conversion never replaces the cPanel application path with a symlink" '[ -d "$HOME/app" ] && [ ! -L "$HOME/app" ]'
+old_real_release=$(sed -n 's/^release=//p' "$HOME/app/.deploy-release")
+bash "$script" risk app real-first "$php" >/dev/null; bash "$script" activate app real-first "$php" >/dev/null
+check_expr "real-directory activation selects candidate code beneath a real stable path" '[ -d "$HOME/app" ] && [ ! -L "$HOME/app" ]'
+check "real-directory activation retains the exact prior release" test -f "$HOME/.deployments/app/releases/$old_real_release/.deploy-release"
+bash "$script" serve app real-first "$php" >/dev/null; bash "$script" commit app real-first "$php" >/dev/null; bash "$script" finalize app real-first "$php" >/dev/null
+check "real-directory healthy deployment reports exact selected release" test "$(status_field real-first live_release)" = real-first
+check "real-directory healthy deployment reports exact commit" test "$(status_field real-first live_commit)" = "$commit"
+
+# A real stable path is only a location token; its exact release and commit
+# identity captured by begin must remain unchanged through quiescence.
+begin_and_upload_directory real-prior-tamper; bash "$script" preflight app real-prior-tamper '' >/dev/null; cp "$CRONTAB_FILE" "$root/prior-tamper-cron"
+mv -T "$HOME/app" "$root/original-stable"; cp -a "$root/original-stable" "$HOME/app"; sed -i 's/^release=.*/release=swapped-release/' "$HOME/app/.deploy-release"
+bash "$script" quiesce app real-prior-tamper "$php" >/dev/null 2>&1
+check "quiesce rejects a different managed real directory swapped in after begin" test "$?" -ne 0
+check "prior identity mismatch is refused before cron mutation" cmp -s "$CRONTAB_FILE" "$root/prior-tamper-cron"
+rm -rf "$HOME/app"; mv -T "$root/original-stable" "$HOME/app"; bash "$script" finalize app real-prior-tamper "$php" >/dev/null
+
+# Reproduce SVC's manually recovered hybrid state: the exact selected release
+# is a real stable directory while a managed copy with the same id remains.
+cp -a "$HOME/app" "$HOME/.deployments/app/releases/real-first"
+begin_and_upload_directory real-next; bash "$script" preflight app real-next '' >/dev/null; bash "$script" prepare app real-next "$php" >/dev/null
+check "later real-directory preparation leaves the selected real directory serving" test "$(status_field real-next live_state)" = serving
+bash "$script" quiesce app real-next "$php" >/dev/null; bash "$script" risk app real-next "$php" >/dev/null; bash "$script" activate app real-next "$php" >/dev/null
+bash "$script" serve app real-next "$php" >/dev/null; bash "$script" commit app real-next "$php" >/dev/null; bash "$script" finalize app real-next "$php" >/dev/null
+check_expr "subsequent real-directory deployment keeps the vhost ancestor real" '[ -d "$HOME/app" ] && [ ! -L "$HOME/app" ]'
+check "subsequent real-directory deployment selects exact metadata" grep -Fqx 'release=real-next' "$HOME/app/.deploy-release"
+check "hybrid recovery evidence is preserved instead of overwritten" test -d "$HOME/.deployments/app/releases/real-first"
+check "hybrid selected directory is retained at a unique transaction path" test -d "$HOME/.deployments/app/releases/retained-real-first-real-next"
+
+setup; make_legacy; begin_and_upload_directory real-pre-risk; preflight_quiesce real-pre-risk; bash "$script" prepare app real-pre-risk "$php" >/dev/null
+bash "$script" finalize app real-pre-risk "$php" >/dev/null
+check "real-directory pre-risk recovery restores old code serving" test "$(status_field real-pre-risk live_state)" = serving
+check "real-directory pre-risk recovery restores cron" grep -Fq '# JOB:app-scheduler' "$CRONTAB_FILE"
+
+setup; make_legacy; begin_and_upload_directory real-adoption-marker; preflight_quiesce real-adoption-marker
+transaction="$HOME/.deployments/app/state/real-adoption-marker"; adopted_release=legacy-interrupted-real-adoption-marker; adopted_target=".deployments/app/releases/$adopted_release"; printf '%s\n' "$adopted_target" >"$transaction/conversion_target"; printf 'converting\n' >"$transaction/phase"; mv -T "$HOME/app/storage" "$HOME/.deployments/app/shared/storage"; ln -s "$HOME/.deployments/app/shared/storage" "$HOME/app/storage"; printf '%s\n' "$adopted_release" >"$transaction/previous_release"; printf '%s\n' "$commit" >"$transaction/previous_commit"; printf 'release=%s\ncommit=%s\n' "$adopted_release" "$commit" >"$HOME/app/.deploy-release"
+bash "$script" finalize app real-adoption-marker "$php" >/dev/null
+check "interrupted first real-directory metadata adoption proves exact prior release" test "$(status_field real-adoption-marker live_release)" = "$adopted_release"
+check "interrupted first real-directory metadata adoption restores serving" test "$(status_field real-adoption-marker live_state)" = serving
+check "interrupted first real-directory metadata adoption restores cron" grep -Fq '# JOB:app-scheduler' "$CRONTAB_FILE"
+
+setup; make_legacy; begin_and_upload_directory real-before-prior-rename; preflight_quiesce real-before-prior-rename; bash "$script" prepare app real-before-prior-rename "$php" >/dev/null; bash "$script" risk app real-before-prior-rename "$php" >/dev/null
+printf 'activating_before_prior_rename\n' >"$HOME/.deployments/app/state/real-before-prior-rename/phase"
+bash "$script" finalize app real-before-prior-rename "$php" >/dev/null
+check "risk failure before the first rename leaves exact old real code selected down" test "$(status_field real-before-prior-rename live_release)" != real-before-prior-rename -a "$(status_field real-before-prior-rename live_state)" = maintenance
+
+setup; make_legacy; begin_and_upload_directory real-between-renames; preflight_quiesce real-between-renames; bash "$script" prepare app real-between-renames "$php" >/dev/null; bash "$script" risk app real-between-renames "$php" >/dev/null
+transaction="$HOME/.deployments/app/state/real-between-renames"; prior_release=$(sed -n 's/^release=//p' "$HOME/app/.deploy-release"); prior_target=".deployments/app/releases/$prior_release"
+printf '%s\n' "$prior_target" >"$transaction/activation_previous_target"; printf 'activating_before_prior_rename\n' >"$transaction/phase"; mv "$HOME/app" "$HOME/$prior_target"
+bash "$script" finalize app real-between-renames "$php" >/dev/null
+check "interruption between activation renames completes exact candidate selection down" test "$(status_field real-between-renames live_release)" = real-between-renames -a "$(status_field real-between-renames live_state)" = maintenance
+check_expr "between-renames recovery leaves a real application directory" '[ -d "$HOME/app" ] && [ ! -L "$HOME/app" ]'
+
+setup; make_legacy; begin_and_upload_directory real-after-candidate-rename; preflight_quiesce real-after-candidate-rename; bash "$script" prepare app real-after-candidate-rename "$php" >/dev/null; bash "$script" risk app real-after-candidate-rename "$php" >/dev/null
+transaction="$HOME/.deployments/app/state/real-after-candidate-rename"; prior_release=$(sed -n 's/^release=//p' "$HOME/app/.deploy-release"); prior_target=".deployments/app/releases/$prior_release"
+printf '%s\n' "$prior_target" >"$transaction/activation_previous_target"; mv "$HOME/app" "$HOME/$prior_target"; printf '%s\n' "$prior_target" >"$transaction/previous_target"; mv "$candidate" "$HOME/app"; printf 'activating_after_candidate_rename\n' >"$transaction/phase"
+bash "$script" finalize app real-after-candidate-rename "$php" >/dev/null
+check "interruption after candidate rename proves exact candidate selected down" test "$(status_field real-after-candidate-rename live_release)" = real-after-candidate-rename -a "$(status_field real-after-candidate-rename live_state)" = maintenance
+
+setup; make_legacy; begin_and_upload_directory real-rollback rollback; preflight_quiesce real-rollback; bash "$script" prepare app real-rollback "$php" >/dev/null
+prior_real_release=$(sed -n 's/^release=//p' "$HOME/app/.deploy-release"); bash "$script" risk app real-rollback "$php" >/dev/null; bash "$script" activate app real-rollback "$php" >/dev/null
+printf 'false\n' >"$HOME/.deployments/app/state/real-rollback/activated"; printf 'activating_after_candidate_rename\n' >"$HOME/.deployments/app/state/real-rollback/phase"
+bash "$script" finalize app real-rollback "$php" >/dev/null
+check "real-directory rollback restores exact prior metadata" test "$(status_field real-rollback live_release)" = "$prior_real_release"
+check "real-directory rollback proves prior code serving" test "$(status_field real-rollback live_state)" = serving
+check_expr "real-directory rollback never restores a symlinked vhost ancestor" '[ -d "$HOME/app" ] && [ ! -L "$HOME/app" ]'
+
+setup; make_legacy; begin_and_upload_directory real-rollback-commit-tamper rollback; preflight_quiesce real-rollback-commit-tamper; bash "$script" prepare app real-rollback-commit-tamper "$php" >/dev/null; bash "$script" risk app real-rollback-commit-tamper "$php" >/dev/null; bash "$script" activate app real-rollback-commit-tamper "$php" >/dev/null
+transaction="$HOME/.deployments/app/state/real-rollback-commit-tamper"; prior_target=$(cat "$transaction/previous_target"); mv -T "$HOME/app" "$candidate"; mv -T "$HOME/$prior_target" "$HOME/app"; sed -i 's/^commit=.*/commit=deadbeef/' "$HOME/app/.deploy-release"; : >"$PHP_LOG"
+bash "$script" finalize app real-rollback-commit-tamper "$php" >/dev/null 2>&1
+check "rollback refuses an already-restored prior directory with a changed commit" test "$?" -ne 0
+check "rollback commit mismatch never runs artisan up" sh -c '! grep -Fq "artisan up" "$1"' sh "$PHP_LOG"
+check_expr "rollback commit mismatch keeps cron paused and retains its lock" '[ ! -s "$CRONTAB_FILE" ] && [ -d "$HOME/.deployments/app/deploy.lock" ]'
+
+setup; make_legacy; begin_and_upload_directory real-candidate-tamper; preflight_quiesce real-candidate-tamper; bash "$script" prepare app real-candidate-tamper "$php" >/dev/null; bash "$script" risk app real-candidate-tamper "$php" >/dev/null; bash "$script" activate app real-candidate-tamper "$php" >/dev/null
+transaction="$HOME/.deployments/app/state/real-candidate-tamper"; prior_target=$(cat "$transaction/previous_target"); mv -T "$HOME/app" "$candidate"; mv -T "$HOME/$prior_target" "$HOME/app"; : >"$PHP_LOG"
+bash "$script" serve app real-candidate-tamper "$php" >/dev/null 2>&1
+check "serve rejects an off-live exact candidate when stable selects another managed release" test "$?" -ne 0
+check "candidate selection mismatch never runs artisan up on an off-live copy" test ! -s "$PHP_LOG"
+bash "$script" finalize app real-candidate-tamper "$php" >/dev/null
+
+setup; make_legacy; begin_and_upload symlink-established; preflight_quiesce symlink-established; bash "$script" prepare app symlink-established "$php" >/dev/null; bash "$script" risk app symlink-established "$php" >/dev/null; bash "$script" activate app symlink-established "$php" >/dev/null; bash "$script" serve app symlink-established "$php" >/dev/null; bash "$script" commit app symlink-established "$php" >/dev/null; bash "$script" finalize app symlink-established "$php" >/dev/null
+check "migration fixture begins with the legacy v2 managed symlink" test -L "$HOME/app"
+begin_and_upload_directory migrate-symlink; bash "$script" preflight app migrate-symlink '' >"$root/migrate-preflight.out"; bash "$script" quiesce app migrate-symlink "$php" >/dev/null; bash "$script" prepare app migrate-symlink "$php" >/dev/null
+check "stable-directory mode recognizes a v2 symlink as a layout conversion" grep -Fq 'conversion_required=true' "$root/migrate-preflight.out"
+check_expr "v2 symlink migration selects the identical code through a real directory" '[ -d "$HOME/app" ] && [ ! -L "$HOME/app" ]'
+bash "$script" finalize app migrate-symlink "$php" >/dev/null
+check "pre-risk v2 symlink migration restores the same release serving" test "$(status_field migrate-symlink live_release)" = symlink-established -a "$(status_field migrate-symlink live_state)" = serving
+
+setup; make_legacy; begin_and_upload symlink-interrupted-source; preflight_quiesce symlink-interrupted-source; bash "$script" prepare app symlink-interrupted-source "$php" >/dev/null; bash "$script" risk app symlink-interrupted-source "$php" >/dev/null; bash "$script" activate app symlink-interrupted-source "$php" >/dev/null; bash "$script" serve app symlink-interrupted-source "$php" >/dev/null; bash "$script" commit app symlink-interrupted-source "$php" >/dev/null; bash "$script" finalize app symlink-interrupted-source "$php" >/dev/null
+begin_and_upload_directory migrate-symlink-interrupted; bash "$script" preflight app migrate-symlink-interrupted '' >/dev/null; bash "$script" quiesce app migrate-symlink-interrupted "$php" >/dev/null
+transaction="$HOME/.deployments/app/state/migrate-symlink-interrupted"; conversion_target=$(readlink "$HOME/app"); conversion_release=${conversion_target##*/}; conversion_commit=$(sed -n 's/^commit=//p' "$HOME/$conversion_target/.deploy-release"); printf '%s\n' "$conversion_target" >"$transaction/conversion_target"; printf '%s\n' "$conversion_release" >"$transaction/conversion_release"; printf '%s\n' "$conversion_commit" >"$transaction/conversion_commit"; printf 'converting_symlink\n' >"$transaction/phase"; rm "$HOME/app"
+bash "$script" finalize app migrate-symlink-interrupted "$php" >/dev/null
+check_expr "interrupted v2 symlink removal restores its exact target as a real directory" '[ -d "$HOME/app" ] && [ ! -L "$HOME/app" ]'
+check "interrupted v2 symlink migration restores exact old code serving" test "$(status_field migrate-symlink-interrupted live_release)" = symlink-interrupted-source -a "$(status_field migrate-symlink-interrupted live_state)" = serving
+
+setup; make_legacy; begin_and_upload symlink-moved-source; preflight_quiesce symlink-moved-source; bash "$script" prepare app symlink-moved-source "$php" >/dev/null; bash "$script" risk app symlink-moved-source "$php" >/dev/null; bash "$script" activate app symlink-moved-source "$php" >/dev/null; bash "$script" serve app symlink-moved-source "$php" >/dev/null; bash "$script" commit app symlink-moved-source "$php" >/dev/null; bash "$script" finalize app symlink-moved-source "$php" >/dev/null
+begin_and_upload_directory migrate-symlink-moved; bash "$script" preflight app migrate-symlink-moved '' >/dev/null; bash "$script" quiesce app migrate-symlink-moved "$php" >/dev/null
+transaction="$HOME/.deployments/app/state/migrate-symlink-moved"; conversion_target=$(readlink "$HOME/app"); conversion_release=${conversion_target##*/}; conversion_commit=$(sed -n 's/^commit=//p' "$HOME/$conversion_target/.deploy-release"); printf '%s\n' "$conversion_target" >"$transaction/conversion_target"; printf '%s\n' "$conversion_release" >"$transaction/conversion_release"; printf '%s\n' "$conversion_commit" >"$transaction/conversion_commit"; printf 'symlink_removed\n' >"$transaction/phase"; rm "$HOME/app"; mv "$HOME/$conversion_target" "$HOME/app"
+bash "$script" finalize app migrate-symlink-moved "$php" >/dev/null
+check_expr "interruption after symlink target move proves the exact real stable directory" '[ -d "$HOME/app" ] && [ ! -L "$HOME/app" ]'
+check "post-move symlink migration interruption restores exact old code serving" test "$(status_field migrate-symlink-moved live_release)" = symlink-moved-source -a "$(status_field migrate-symlink-moved live_state)" = serving
+
 echo "failures: $fails"
 exit "$fails"

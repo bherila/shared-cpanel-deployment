@@ -1,13 +1,17 @@
 # shared-cpanel-deployment
 
 One GitHub Action that deploys a Laravel application to versioned releases on a **shared cPanel
-account**: several applications, one account home, one crontab. The v2 default validates a candidate
-before an atomic stable-symlink switch and preserves the previously selected code. Every step that
+account**: several applications, one account home, one crontab. The default validates a candidate
+before a failure-safe same-filesystem directory activation and preserves the previously selected code. Every step that
 touches shared state is scoped to this application: its release tree, stable path, crontab lines and
 runtime data.
 
 It replaces the deploy YAML that each application used to carry, and the lessons those copies learned
 the hard way are built in rather than remembered.
+
+Atomic-mode framework probes are CI-tested against Laravel 12 and 13. Those are the supported Laravel
+majors for the versioned release state machine; older applications should remain pinned to a compatible
+action revision or use the explicit in-place escape hatch until upgraded.
 
 ## Usage
 
@@ -50,7 +54,7 @@ That is a complete atomic deploy. With the defaults it:
    live `.env` forward into the candidate, and checks non-empty `APP_KEY`, `APP_ENV` and `APP_URL`;
 6. pauses this application's cron, puts the old selected release in maintenance, runs candidate
    migrations, confirms none remain pending, caches config and runs candidate checks;
-7. selects the candidate with an atomic symlink replacement and runs post-activation work while
+7. retains the old real application directory, renames the candidate into its stable place and runs post-activation work while
    maintenance remains enabled;
 8. brings the candidate up, proves it serves, then installs/restores cron and verifies HTTP, PHP and
    any application verification script before committing
@@ -74,6 +78,7 @@ implicit behavior change.
 | `php-version` | `8.5` | Web handler, CLI binary and the PHP check. |
 | `php-binary` | `/opt/cpanel/ea-php85/root/usr/bin/php` | Derived from `php-version`. cPanel's default `php` is older. |
 | `deployment-mode` | `atomic` | Safe v2 versioned releases. `in-place` is the explicit v1 escape hatch. |
+| `atomic-layout` | `stable-directory` | Keeps `~/<deploy-dir>` real for cPanel/LiteSpeed. `release-symlink` is the v2.0 compatibility layout for proven hosts. |
 | `persistent-paths` | `storage` | Runtime files or directories shared by atomic releases; declare every server-authoritative path. |
 | `retain-releases` | `3` | Minimum 2; selected and prior releases are protected. |
 | `deploy-lock-timeout` | `21600` | Diagnostic expected duration stored with the lock. v2 never takes over an aged lock automatically. |
@@ -122,19 +127,22 @@ Outputs: `ssh-target`, `php-binary`, `release-id`, `live-release`, `live-commit`
 
 ## Atomic release contract
 
-The stable path and cron working directory do not change:
+The stable path and cron working directory do not change. By default the path is a real directory,
+because some cPanel/LiteSpeed vhosts return a host-level 404 when an application-directory ancestor is
+a symlink:
 
 ```text
-~/example-laravel -> .deployments/example-laravel/releases/<release-id>
+~/example-laravel/                         # selected release; always a real directory when present
 ~/.deployments/example-laravel/
-  releases/<release-id>/
+  releases/<candidate-release-id>/         # before activation
+  releases/<retained-prior-release-id>/    # after activation
   shared/storage/
   state/<incomplete-release-id>/
   deploy.lock/
 ```
 
 The release id contains the source revision, GitHub run id and attempt. Each release also has a
-`.deploy-release` metadata file. Final status resolves the real stable symlink and metadata; it does
+`.deploy-release` metadata file. Final status resolves the real stable directory or compatibility symlink and metadata; it does
 not assume that the attempted candidate became live. `live-state` distinguishes `serving`,
 `maintenance`, `absent` and `unavailable`.
 
@@ -143,8 +151,21 @@ size plus a 256 MiB staging reserve. A reliably numeric account quota is enforce
 is explicitly report-only while the filesystem gate remains mandatory. On first conversion, the
 read-only preflight reports stable/webroot links, persistent types and symlinks, and filesystem devices.
 The guarded conversion enters maintenance, pauses cron, drains workers, moves runtime data into
-`shared`, moves unchanged legacy code into a release directory, and selects that same code through the
-stable symlink. A candidate failure after conversion still leaves the old code selected.
+`shared`, and records exact metadata on the unchanged real directory. A candidate failure before the
+database-risk boundary restores that same code. Activation is a guarded, recoverable two-rename
+transition: it retains the real old directory under `releases/`, then moves the prepared candidate into
+the stable name. It is not a single atomic directory exchange; the stable path is briefly absent between
+the two same-filesystem renames while the application and its cron are quiesced. Durable state brackets
+both boundaries: interruption before the first leaves old code selected down; interruption between them
+completes exact candidate selection down; interruption after the second proves the selected candidate.
+
+`atomic-layout: release-symlink` preserves the v2.0 selection mechanism only for hosts where the vhost
+has been proven to follow a symlinked application-directory ancestor. A normal `stable-directory`
+deployment also migrates an existing managed v2.0 symlink while quiesced: it removes only the proven
+managed link and moves its exact target to the stable real path before database risk. If an operator
+has already restored a real stable copy while retaining the same managed release as recovery evidence
+(the SVC recovery shape), activation preserves that copy and retains the selected directory under a
+unique transaction-scoped name; neither is overwritten.
 
 `persistent-paths` accepts existing standalone regular files and directories. Neutral runtime files
 such as `runtime/state.bin` and non-code public assets such as `public/ohif` may be declared. Laravel
@@ -183,7 +204,8 @@ The atomic order is:
 4. persist the database-risk marker, then run `pre-migrate-script <candidate> <php> <stable>`;
 5. migrate, assert no pending migrations, cache config and run `artisan-commands` on the candidate;
 6. run `post-deploy-script <candidate> <php> <stable>` and `pre-activate-script` with the same args;
-7. re-prove old and candidate maintenance, atomically select the candidate, revalidate/create
+7. re-prove old and candidate maintenance, retain old code and select the candidate with guarded
+   same-filesystem renames, revalidate/create
    `webroot-symlink`, then run `post-activate-script <stable> <php> <candidate>` while maintenance remains;
 8. run `artisan up`, prove Laravel is serving, and only then install or restore application cron;
 9. run built-in HTTP/PHP checks, then `verification-script` on the runner.
@@ -216,7 +238,8 @@ maintenance. The paused application cron lines are preserved privately under
 `~/.deployments/<deploy-dir>/recovery/<release-id>.cron` for manual recovery, even after the deployment
 transaction unlocks. Selection and service state are always reported separately.
 
-`failure-policy: rollback` restores the prior stable symlink, prior app cron lines and serving state.
+`failure-policy: rollback` restores the retained prior directory (or prior stable symlink in the
+compatibility layout), prior app cron lines and serving state.
 It does not and cannot roll back the database. Use it only when every migration in the release follows
 an expand/contract plan compatible with the prior code. Otherwise inspect the failure and schema before
 performing a manual code rollback.

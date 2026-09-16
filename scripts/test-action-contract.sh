@@ -20,7 +20,10 @@ line_of() {
 
 atomic_default=$(awk '$1 == "deployment-mode:" { found=1 } found && $1 == "default:" { print $2; exit }' "$action")
 check "v2 defaults to atomic deployment" test "$atomic_default" = atomic
+layout_default=$(awk '$1 == "atomic-layout:" { found=1 } found && $1 == "default:" { print $2; exit }' "$action")
+check "atomic deployment defaults to a cPanel-compatible real stable directory" test "$layout_default" = stable-directory
 check "legacy in-place mode remains an explicit branch" grep -Fq "inputs.deployment-mode == 'in-place'" "$action"
+check "the selected atomic layout is persisted with the remote transaction" grep -Fq '"$ATOMIC_LAYOUT" "${paths[@]}"' "$action"
 
 recovery=$(line_of 'name: Finalize an explicitly selected interrupted transaction')
 begin=$(line_of 'name: Start the remote atomic transaction')
