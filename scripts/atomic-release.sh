@@ -228,6 +228,7 @@ maintenance_state() {
     (cd "$root" && run_php "$php" "$memory" -r '
         require "vendor/autoload.php";
         $app = require "bootstrap/app.php";
+        $app->make(Illuminate\Contracts\Console\Kernel::class)->bootstrap();
         exit($app->isDownForMaintenance() ? 0 : 1);
     ')
 }

@@ -22,6 +22,7 @@ atomic_default=$(awk '$1 == "deployment-mode:" { found=1 } found && $1 == "defau
 check "v2 defaults to atomic deployment" test "$atomic_default" = atomic
 check "legacy in-place mode remains an explicit branch" grep -Fq "inputs.deployment-mode == 'in-place'" "$action"
 
+recovery=$(line_of 'name: Finalize an explicitly selected interrupted transaction')
 begin=$(line_of 'name: Start the remote atomic transaction')
 capacity=$(line_of 'name: Verify remote capacity before atomic upload')
 upload=$(line_of 'name: Upload the atomic candidate')
@@ -46,6 +47,8 @@ commit=$(line_of 'name: Commit the verified atomic release')
 finalize=$(line_of 'name: Recover, unlock and report the atomic deployment')
 
 check "read-only preflight precedes first-conversion mutation" test "$begin" -lt "$preflight" -a "$preflight" -lt "$prepare"
+check "explicit interrupted-transaction recovery precedes a new transaction" test "$recovery" -lt "$begin"
+check "explicit recovery must prove serving before a new transaction" grep -Fq 'Interrupted transaction finalized without proving that the selected application is serving' "$action"
 check "capacity is enforced before candidate upload" test "$begin" -lt "$capacity" -a "$capacity" -lt "$upload"
 check "legacy worker drain precedes first-conversion mutation" test "$preflight" -lt "$conversion_quiesce" -a "$conversion_quiesce" -lt "$conversion_drain" -a "$conversion_drain" -lt "$prepare"
 check "versioned worker drain precedes durable risk and migration" test "$prepare" -lt "$versioned_quiesce" -a "$versioned_quiesce" -lt "$versioned_drain" -a "$versioned_drain" -lt "$risk" -a "$risk" -lt "$pre_migrate" -a "$pre_migrate" -lt "$migrate"
