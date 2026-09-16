@@ -94,5 +94,14 @@ rm "$HOME/app/.env"
 run app '' 'REQUIRE:APP_KEY'; status=$?
 check "a missing .env fails" '[ "$status" -eq 1 ]'
 
+# 8. Atomic candidates use the exact managed path grammar and keep a release-local environment.
+setup
+managed="$HOME/.deployments/app/releases/release-1"
+mkdir -p "$managed"
+cp "$HOME/app/.env" "$managed/.env"
+bash "$script" .deployments/app/releases/release-1 '' 'SET:APP_ENV=production' >"$root/out" 2>&1; status=$?
+check "a managed atomic candidate environment can be configured" \
+    '[ "$status" -eq 0 ] && grep -Fqx APP_ENV=production "$managed/.env" && grep -Fqx "export APP_ENV=local" "$HOME/app/.env"'
+
 echo "failures: $fails"
 exit "$fails"

@@ -2,20 +2,33 @@
 # Keep or create one complete Laravel Passport signing-key pair; never rotate a partial pair.
 set -euo pipefail
 
-if [ "$#" -ne 3 ]; then
-    echo "usage: ensure-passport-keys.sh <app-dir> <php> <key-directory>" >&2
+if [ "$#" -lt 3 ] || [ "$#" -gt 4 ]; then
+    echo "usage: ensure-passport-keys.sh <app-dir> <php> <key-directory> [managed-shared-root]" >&2
     exit 2
 fi
 
 app_dir=$1
 php=$2
 key_directory=$3
+managed_shared_root=${4:-}
 
 case $app_dir in
-    '' | . | .. | .* | *[!A-Za-z0-9._-]*)
-        echo "::error::The application directory must be a plain, non-hidden name under the account home." >&2
-        exit 2 ;;
+    '' | . | .. | /* | *..* | *[!A-Za-z0-9._/-]*) echo "::error::The application path is unsafe." >&2; exit 2 ;;
+    .deployments/*/releases/*)
+        IFS=/ read -r prefix managed_app releases_component managed_release extra <<<"$app_dir"
+        if [ "$prefix" != .deployments ] || [ "$releases_component" != releases ] || [ -n "$extra" ]; then
+            echo "::error::The managed release path is malformed." >&2; exit 2
+        fi
+        case "$managed_app:$managed_release" in *[!A-Za-z0-9._:-]* | :* | *:) echo "::error::The managed release path is malformed." >&2; exit 2 ;; esac ;;
+    .* | */*) echo "::error::The application path must be a plain account-home name or a managed release." >&2; exit 2 ;;
 esac
+if [ -n "$managed_shared_root" ]; then
+    case $managed_shared_root in
+        .deployments/*/shared)
+            case $managed_shared_root in *..* | *[!A-Za-z0-9._/-]*) echo "::error::The managed shared root is unsafe." >&2; exit 2 ;; esac ;;
+        *) echo "::error::The managed shared root is malformed." >&2; exit 2 ;;
+    esac
+fi
 case $php in
     /*) ;;
     *) echo "::error::PHP binary must be an absolute path." >&2; exit 2 ;;
@@ -38,7 +51,13 @@ current=$app
 IFS=/ read -r -a components <<<"$key_directory"
 for component in "${components[@]}"; do
     current="$current/$component"
-    [ ! -L "$current" ] || { echo "::error::Passport key path must not traverse a symlink." >&2; exit 1; }
+    if [ -L "$current" ]; then
+        resolved=$(readlink -f "$current")
+        if [ -z "$managed_shared_root" ] || [[ "$resolved/" != "$HOME/$managed_shared_root/"* ]]; then
+            echo "::error::Passport key path must not traverse an unmanaged symlink." >&2
+            exit 1
+        fi
+    fi
     if [ -e "$current" ] && [ ! -d "$current" ]; then
         echo "::error::Passport key path contains a non-directory component." >&2
         exit 1

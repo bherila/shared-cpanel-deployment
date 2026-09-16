@@ -1,8 +1,10 @@
 # shared-cpanel-deployment
 
-One GitHub Action that deploys a Laravel application to its own directory on a **shared cPanel
-account**: several applications, one account home, one crontab. Every step that touches shared state is
-scoped to this application: its directory, its crontab lines, its `.env`.
+One GitHub Action that deploys a Laravel application to versioned releases on a **shared cPanel
+account**: several applications, one account home, one crontab. The v2 default validates a candidate
+before an atomic stable-symlink switch and preserves the previously selected code. Every step that
+touches shared state is scoped to this application: its release tree, stable path, crontab lines and
+runtime data.
 
 It replaces the deploy YAML that each application used to carry, and the lessons those copies learned
 the hard way are built in rather than remembered.
@@ -25,7 +27,7 @@ deploy:
     - uses: pnpm/action-setup@<sha> # v6
     - run: pnpm install --frozen-lockfile && pnpm run build
 
-    - uses: bherila/shared-cpanel-deployment@<full commit sha> # v1.0.0
+    - uses: bherila/shared-cpanel-deployment@<full commit sha> # v2
       with:
         ssh-host: ${{ secrets.SSH_HOST }}
         ssh-username: ${{ secrets.SSH_USERNAME }}
@@ -35,21 +37,29 @@ deploy:
         site-url: https://example.bherila.net
 ```
 
-That is a complete deploy. With the defaults it:
+That is a complete atomic deploy. With the defaults it:
 
 1. writes the key and **pinned** host key for one SSH alias (nothing else in `~/.ssh/config` changes);
 2. adds cPanel's `ea-php85` handler and a LiteSpeed `php_value memory_limit 1024M` to `public/.htaccess`,
    unless the file already sets them;
-3. uploads with a **guarded** `rsync --delete` (below), keeping `.env` and runtime storage;
-4. checks `.env` has non-empty `APP_KEY`, `APP_ENV` and `APP_URL`;
-5. runs `config:clear`, `migrate --force`, verifies no migration remains pending, then runs
-   `config:cache`;
-6. installs `* * * * * cd "$HOME/example-laravel" && …php -d memory_limit=1G artisan schedule:run … # JOB:example-laravel-scheduler`
-   in the account crontab, **replacing only this application's lines**;
-7. fails unless `https://example.bherila.net/up` answers, and unless the vhost really serves PHP 8.5 with
-   at least 1024M.
+3. acquires an application-scoped remote lock, enforces upload headroom, and uploads into
+   `~/.deployments/example-laravel/releases/<release-id>`;
+4. preflights the stable path, persistent data, webroot, filesystem and disk/quota information before
+   changing the legacy layout;
+5. quiesces a legacy deployment before its one-time runtime-data move, shares `storage`, copies the
+   live `.env` forward into the candidate, and checks non-empty `APP_KEY`, `APP_ENV` and `APP_URL`;
+6. pauses this application's cron, puts the old selected release in maintenance, runs candidate
+   migrations, confirms none remain pending, caches config and runs candidate checks;
+7. selects the candidate with an atomic symlink replacement and runs post-activation work while
+   maintenance remains enabled;
+8. brings the candidate up, proves it serves, then installs/restores cron and verifies HTTP, PHP and
+   any application verification script before committing
+   the release and cleans old releases;
+9. always reports which release and commit are selected and whether they are serving or in maintenance.
 
 Pin the action to a full commit SHA. The job holds a key that reaches every application on the account.
+Every pre-v2 consumer is SHA-pinned, so moving to v2 is a deliberate layout migration rather than an
+implicit behavior change.
 
 ## Inputs
 
@@ -63,10 +73,16 @@ Pin the action to a full commit SHA. The job holds a key that reaches every appl
 | `site-url` | required | https URL for the health and PHP checks. |
 | `php-version` | `8.5` | Web handler, CLI binary and the PHP check. |
 | `php-binary` | `/opt/cpanel/ea-php85/root/usr/bin/php` | Derived from `php-version`. cPanel's default `php` is older. |
+| `deployment-mode` | `atomic` | Safe v2 versioned releases. `in-place` is the explicit v1 escape hatch. |
+| `persistent-paths` | `storage` | Runtime files or directories shared by atomic releases; declare every server-authoritative path. |
+| `retain-releases` | `3` | Minimum 2; selected and prior releases are protected. |
+| `deploy-lock-timeout` | `21600` | Diagnostic expected duration stored with the lock. v2 never takes over an aged lock automatically. |
+| `failure-policy` | `maintenance` | `rollback` opts into serving prior code after DB changes and requires expand/contract compatibility. |
+| `initial-live-commit` | — | Exact revision required for the first conversion of an existing in-place app. |
 | **Upload** | | |
 | `paths` | the standard Laravel tree | Newline-separated, relative to the checkout. |
 | `excludes` | — | Extra rsync excludes, e.g. an application data directory under `storage/app`. |
-| `keep-runtime-storage` | `true` | Keeps `storage/app`, `storage/logs`, framework cache, sessions and views. |
+| `keep-runtime-storage` | `true` | In-place mode only. Atomic mode shares `persistent-paths`. |
 | `set-php-handler` | `true` | |
 | `web-memory-limit` | `1024M` | Empty leaves `.htaccess` alone (the PHP check then requires 128M). |
 | `webroot-symlink` | — | e.g. `ucadmin.example.com` → `<deploy-dir>/public`. A real directory there fails; it is never deleted. |
@@ -77,15 +93,19 @@ Pin the action to a full commit SHA. The job holds a key that reaches every appl
 | `required-env-keys` | `APP_KEY` `APP_ENV` `APP_URL` | The deploy stops before migrating if any is missing or empty. |
 | `env-assert` | — | Exact `KEY=value` lines that must be present after `.env` updates, for deployment-profile and similar boundaries. |
 | **Persistent runtime files** | | |
-| `passport-key-directory` | — | Relative path containing Passport's two OAuth keys. Keeps a complete pair, creates an absent pair, and refuses a partial pair. |
+| `passport-key-directory` | — | Relative path containing Passport's two OAuth keys. Atomic mode requires it to be covered by `persistent-paths`. |
 | `branding-source` | — | Private directory below `~/.config/` copied into `public/branding` after upload. Empty skips branding. |
 | `branding-files` | four standard files | Plain names required in the source and copied atomically. |
 | **Artisan** | | |
 | `run-migrations` | `true` | `migrate --force`, followed by an assertion that none remain pending. |
-| `migration-order` | `after-upload` | Use `before-upload` to upload only `database/migrations`, migrate the existing release, verify the result, and then upload application code. |
+| `migration-order` | `after-upload` | In-place compatibility only. Atomic mode always migrates the candidate and rejects `before-upload`. |
 | `artisan-commands` | — | Extra invocations after `config:cache`, e.g. `view:clear`. |
-| `pre-migrate-script` | — | A script in your checkout, run after `.env` and before migration. With `before-upload`, it runs against the previous release before the main upload. Gets `<deploy-dir> <php>`. |
-| `post-deploy-script` | — | Same, after artisan and cron. |
+| `quiesce-script` | — | After cron pause/old-code maintenance and before conversion or DB risk; wait for running workers here. Gets `<candidate-path> <php> <stable-path>`. |
+| `allow-unverified-quiescence` | `false` | Explicit assertion that an existing app owns no process requiring drain. Fresh installs skip this requirement. |
+| `pre-migrate-script` | — | Immediately after the durable DB-risk marker, before migration. Gets `<candidate-path> <php> <stable-path>`. |
+| `post-deploy-script` | — | Atomic candidate validation before selection. In-place retains v1 after-cron timing. Same arguments. |
+| `pre-activate-script` | — | Final atomic candidate check. Gets `<candidate-path> <php> <stable-path>`. |
+| `post-activate-script` | — | Stable-path work after selection and before `artisan up`. It must leave Laravel down and must not start cron/workers. Gets `<stable-path> <php> <candidate-path>`. |
 | **Cron** | | |
 | `install-cron` | `true` | |
 | `cron-memory-limit` | `1G` | Applied to every managed Artisan scheduler and worker line that does not set an explicit limit. The cPanel CLI default is 128M. |
@@ -95,13 +115,123 @@ Pin the action to a full commit SHA. The job holds a key that reaches every appl
 | **Verification** | | |
 | `health-path` | `/up` | Empty skips. |
 | `verify-web-php` | `true` | |
+| `verification-script` | — | Runner-side live checks after `artisan up`, with deployment details in `DEPLOY_*`. |
 
-Outputs: `ssh-target` (the alias) and `php-binary`.
+Outputs: `ssh-target`, `php-binary`, `release-id`, `live-release`, `live-commit` and `live-state`.
+
+## Atomic release contract
+
+The stable path and cron working directory do not change:
+
+```text
+~/example-laravel -> .deployments/example-laravel/releases/<release-id>
+~/.deployments/example-laravel/
+  releases/<release-id>/
+  shared/storage/
+  state/<incomplete-release-id>/
+  deploy.lock/
+```
+
+The release id contains the source revision, GitHub run id and attempt. Each release also has a
+`.deploy-release` metadata file. Final status resolves the real stable symlink and metadata; it does
+not assume that the attempted candidate became live. `live-state` distinguishes `serving`,
+`maintenance`, `absent` and `unavailable`.
+
+Before upload, the action compares local candidate size with remote free space and requires twice that
+size plus a 256 MiB staging reserve. A reliably numeric account quota is enforced too; otherwise quota
+is explicitly report-only while the filesystem gate remains mandatory. On first conversion, the
+read-only preflight reports stable/webroot links, persistent types and symlinks, and filesystem devices.
+The guarded conversion enters maintenance, pauses cron, drains workers, moves runtime data into
+`shared`, moves unchanged legacy code into a release directory, and selects that same code through the
+stable symlink. A candidate failure after conversion still leaves the old code selected.
+
+`persistent-paths` accepts existing standalone regular files and directories. Neutral runtime files
+such as `runtime/state.bin` and non-code public assets such as `public/ohif` may be declared. Laravel
+code roots and entry points (`app`, `bootstrap`, `config`, `routes`, `resources`, `vendor`, public entry
+points/builds, migrations, package/build manifests, Composer metadata and `artisan`) are refused. A
+declared path absent from both the selected release and candidate is also refused: the action never
+guesses whether it should create a file or directory. On later deployments the selected release must
+already link every declaration to managed shared state; preparation validates this without a
+maintenance blip and refuses unexpected repair or mutation.
+
+Do not persist a lone SQLite file. SQLite may have adjacent `-wal`, `-shm`, or `-journal` sidecars, so
+sharing only `database/database.sqlite` can lose committed data during activation or cleanup; `.sqlite`
+paths are rejected. Before v2 conversion, quiesce every writer, checkpoint the database, relocate it
+into a wholly persistent runtime directory (for example below `storage`), update `DB_DATABASE`, and
+persist that directory. Do not share all of `database/`, because it contains release migrations.
+
+`.env` is deliberately **not** shared. With no `env-source`, the selected release's private `.env` is
+copied into the candidate before changes and checks. With `env-source`, that server-owned file is
+installed into the candidate. Thus configuration changes cannot affect selected old code before
+activation.
+
+### Hook phases and paths
+
+Hook paths are safe paths relative to `$HOME`, never arbitrary absolute paths:
+
+- candidate: `.deployments/<deploy-dir>/releases/<release-id>`;
+- stable: `<deploy-dir>`.
+
+The atomic order is:
+
+1. for first conversion only, pause cron, put selected old code in maintenance, run
+   `quiesce-script <candidate> <php> <stable>`, and convert persistent paths;
+2. configure candidate environment, persistent Passport keys and branding;
+3. for an already-versioned or fresh app, pause cron/old code now and run `quiesce-script`; first
+   conversion remains quiesced from step 1;
+4. persist the database-risk marker, then run `pre-migrate-script <candidate> <php> <stable>`;
+5. migrate, assert no pending migrations, cache config and run `artisan-commands` on the candidate;
+6. run `post-deploy-script <candidate> <php> <stable>` and `pre-activate-script` with the same args;
+7. re-prove old and candidate maintenance, atomically select the candidate, revalidate/create
+   `webroot-symlink`, then run `post-activate-script <stable> <php> <candidate>` while maintenance remains;
+8. run `artisan up`, prove Laravel is serving, and only then install or restore application cron;
+9. run built-in HTTP/PHP checks, then `verification-script` on the runner.
+
+The runner verification environment includes `DEPLOY_SSH_TARGET`, `DEPLOY_PHP_BINARY`, `DEPLOY_DIR`,
+`DEPLOY_STABLE_DIR`, `DEPLOY_CANDIDATE_DIR`, `DEPLOY_SITE_URL`, `DEPLOY_RELEASE_ID`,
+`DEPLOY_SOURCE_COMMIT`, `DEPLOY_LIVE_RELEASE`, `DEPLOY_LIVE_COMMIT`, `DEPLOY_LIVE_STATE` and
+`DEPLOYMENT_MODE`.
+
+`post-activate-script` is a trusted maintenance-only hook. It must not call `artisan up`, install cron,
+or start a scheduler or worker; the action re-proves maintenance when the hook returns. Express managed
+scheduled work with `cron-lines` and `extra-cron-lines`, which are installed only after serving is proven.
+
+An existing app must provide `quiesce-script` by default. The five initial consumers use it to wait for
+workers or assert that no app-owned PHP process remains. Set `allow-unverified-quiescence:true` only
+when the application contract proves it never owns a scheduler, queue worker, or other long-running
+process; the explicit acknowledgment is intentionally visible in review. Fresh installs need neither.
+
+### Failure boundary
+
+Failures before the database-risk boundary restore selected code and cron to serving state. Recovery
+intent is persisted before either is first changed, including during one-time conversion. An app that
+is already intentionally in Laravel maintenance is refused before mutation; v2 never silently brings
+it up. Immediately before `pre-migrate-script`, the durable risk marker is written only after cron is
+paused, old code is down, and the worker-drain hook passed. From that point until candidate activation
+and `artisan up`, no release is intentionally served. A failed or partially applied migration under
+the default `failure-policy: maintenance` leaves
+the **old selected release** in maintenance. A failure after selection leaves the candidate selected in
+maintenance. The paused application cron lines are preserved privately under
+`~/.deployments/<deploy-dir>/recovery/<release-id>.cron` for manual recovery, even after the deployment
+transaction unlocks. Selection and service state are always reported separately.
+
+`failure-policy: rollback` restores the prior stable symlink, prior app cron lines and serving state.
+It does not and cannot roll back the database. Use it only when every migration in the release follows
+an expand/contract plan compatible with the prior code. Otherwise inspect the failure and schema before
+performing a manual code rollback.
+
+One app-scoped remote transaction is allowed at a time. Automatic age-based takeover is forbidden: a
+long migration can outlive any lease, and overlapping it is unsafe. After proving the owning workflow
+and remote processes have stopped, an operator must recover/remove an abandoned lock deliberately.
+Every successfully finalized failure becomes retention-eligible; cleanup preserves the live release,
+the prior release and genuinely incomplete transactions.
 
 ## What the guards refuse
 
-**Upload** (`scripts/rsync-deploy.sh`). `--delete` removes whatever the upload does not contain, and the
-account home holds other applications and cPanel's own directories.
+**Upload.** Atomic mode (`scripts/rsync-atomic-release.sh`) only writes the exact empty candidate created
+by the lock-owning transaction. In-place mode (`scripts/rsync-deploy.sh`) retains the v1 destination
+guards. `--delete` removes whatever the upload does not contain, and the account home holds other
+applications and cPanel's own directories.
 
 - An empty, hidden, `.`/`..`, or non-plain `deploy-dir`, or one cPanel owns (`public_html`, `www`, `mail`,
   `etc`, `logs`, `tmp`, `ssl`…). Empty would make the destination the account home.
@@ -121,7 +251,8 @@ changed, after the previous file is saved to `~/.env-backups/<deploy-dir>/` (out
 directory, where `--delete` would remove it). Exact assertions fail before the candidate `.env` is
 installed. Values are never printed.
 
-**Persistent Passport and branding files.** Passport setup keeps an existing complete signing pair,
+**Persistent Passport and branding files.** Atomic mode refuses a Passport directory not covered by a
+declared persistent path. Passport setup keeps an existing complete signing pair,
 creates keys only when neither file exists, and refuses a half-present pair. A configured branding
 source must be a real directory below `~/.config/`; every named source must be a nonempty regular file.
 Files are copied through same-directory temporary files into `public/branding`, and the private source
@@ -130,7 +261,7 @@ remains outside the guarded application upload.
 **Webroot symlink** (`scripts/ensure-webroot-symlink.sh`). Creates or repoints a symlink; never removes
 a real file or directory, which may be another domain's document root or its AutoSSL challenge files.
 
-**Migration-first deployments** (`migration-order: before-upload`). The action accepts this only for
+**Legacy migration-first deployments** (`deployment-mode: in-place`, `migration-order: before-upload`). The action accepts this only for
 an existing Laravel deployment. It verifies that the application and migration directories are real,
 uploads candidate migration files without `--delete`, installs the configured environment, runs the
 pre-migrate hook and migrations against the previous release, and confirms none remain pending before
@@ -150,7 +281,7 @@ against the `ssh-target` output:
         excludes: |
           svc-blobs
           /storage/app/private/oauth/
-        pre-migrate-script: scripts/deploy/ensure-passport-keys.sh
+        quiesce-script: scripts/deploy/wait-for-workers.sh
     - run: ssh ${{ steps.deploy.outputs.ssh-target }} "cd ~/svc-laravel && …"
 ```
 
@@ -161,7 +292,6 @@ an optional private branding bundle can keep that policy declarative:
     - uses: bherila/shared-cpanel-deployment@<sha>
       with:
         # connection, deploy-dir and site-url omitted
-        migration-order: before-upload
         env-source: .config/identity/deployment.env
         env-assert: AUTH_MANAGER_PROFILE=resource
         passport-key-directory: storage/app/private/oauth
@@ -171,14 +301,30 @@ an optional private branding bundle can keep that policy declarative:
           /public/branding/
 ```
 
-Set `artisan-memory-limit: 1G` when migrations or application-specific Artisan commands exceed the
-host's CLI default. The limit applies to migration execution, the pending-migration assertion,
-config caching, and every command in `artisan-commands`.
+Set `artisan-memory-limit: 1G` when the application exceeds the host's CLI default. The limit applies
+to atomic maintenance/serving probes, lifecycle `down`/`up`, migration execution, the pending-migration
+assertion, config caching, and every command in `artisan-commands`.
 
 Leave `BRANDING_SOURCE` empty for the application's default theme. When set, point it at a directory
 such as `.config/identity/branding`; keep the canonical files there rather than inside the rsync target.
 
-## Migrating an existing deploy job
+## Migrating an existing deploy job to v2
+
+Before repinning, inventory every server-authoritative regular file and directory. Keep `storage` and
+add all top-level application data to `persistent-paths`; do not assume an rsync `excludes` pattern is
+a persistence declaration. Move candidate-safe validation to `post-deploy-script` or
+`pre-activate-script`, stable-path activation/import work to `post-activate-script`, managed scheduled
+work to `cron-lines` or `extra-cron-lines`, and live OAuth/MCP/HTTP checks to `verification-script`.
+Use `quiesce-script` to wait for non-cancelling
+old workers after maintenance and cron pause. Add non-cancelling workflow concurrency so two runs do
+not compete before reaching the remote lock.
+
+The initial rollout covers personal-site, SVC, PHR, Games and UC. auth-manager and e-sign remain on
+their pinned v1 commits pending their own persistence and identity-profile reviews. Every rollout
+should first use `failure-policy: maintenance`, verify the reported live release/commit and state, then
+check migrations, cron/scheduler/workers, queues, OAuth/MCP where applicable, `/up`, PHP and memory.
+
+The old checklist remains relevant for the explicit in-place escape hatch:
 
 - Delete the `Append to .htaccess` step and `htaccess-append.txt`, or leave them: an existing handler for
   the same PHP is kept, and a handler for a different PHP fails the deploy rather than adding a second.
@@ -191,8 +337,11 @@ such as `.config/identity/branding`; keep the canonical files there rather than 
 
 ```sh
 shellcheck scripts/*.sh
+bash scripts/test-atomic-release.sh
+bash scripts/test-action-contract.sh
 bash scripts/test-install-cron.sh
 bash scripts/test-prepare-cron-lines.sh
+bash scripts/test-rsync-atomic-release.sh
 bash scripts/test-rsync-deploy.sh
 bash scripts/test-rsync-migrations.sh
 bash scripts/test-htaccess.sh

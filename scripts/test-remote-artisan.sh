@@ -46,5 +46,13 @@ run '../app' "$php" 1G 'config:cache'; invalid_dir=$?
 check "unsafe memory limits and application paths are refused" \
     '[ "$invalid_memory" -eq 2 ] && [ "$invalid_dir" -eq 2 ]'
 
+managed="$HOME/.deployments/example-laravel/releases/release-1"
+mkdir -p "$managed"
+: >"$managed/artisan"
+: >"$log"
+run .deployments/example-laravel/releases/release-1 "$php" 1G 'config:cache'; status=$?
+check "commands run against a managed atomic candidate" \
+    '[ "$status" -eq 0 ] && grep -Fqx -- "-d memory_limit=1G artisan config:cache" "$log"'
+
 echo "failures: $fails"
 exit "$fails"
