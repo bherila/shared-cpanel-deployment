@@ -855,7 +855,7 @@ prepare() {
         echo "usage: ... prepare <app> <release> <php> [memory-limit]" >&2
         exit 2
     fi
-    local php=$1 memory=${2:-} previous previous_root legacy_id legacy_target legacy_root path candidate_path converted=false status source_real destination_real layout previous_release previous_commit
+    local php=$1 memory=${2:-} previous previous_root legacy_id legacy_target legacy_root path candidate_path converted=false status source_real destination_real layout previous_release previous_commit initial_commit
     validate_memory_limit "$memory"
     require_owner
     [ -f "$candidate/artisan" ] || { echo "::error::Candidate release has no artisan file after upload." >&2; exit 1; }
@@ -883,18 +883,18 @@ prepare() {
             status=0; link_persistent_path "$stable" "$path" false || status=$?
             [ "$status" -eq 0 ] || [ "$status" -eq 3 ] || exit "$status"
         done <"$transaction/persistent-paths"
-        read_value initial_live_commit
+        read_value initial_live_commit; initial_commit=$REPLY
         if [ "$layout" = stable-directory ]; then
-            write_release_metadata "$stable" "$legacy_id" "$REPLY"
             write_value previous_release "$legacy_id"
-            write_value previous_commit "$REPLY"
+            write_value previous_commit "$initial_commit"
+            write_release_metadata "$stable" "$legacy_id" "$initial_commit"
             converted=true
             write_value previous_target stable
             previous=stable
             echo "Adopted legacy ~/$app_name as managed real directory $legacy_id in maintenance."
         else
             mv -T "$stable" "$legacy_root"
-            write_release_metadata "$legacy_root" "$legacy_id" "$REPLY"
+            write_release_metadata "$legacy_root" "$legacy_id" "$initial_commit"
             ln -s "$legacy_target" "$stable"
             converted=true
             write_value previous_target "$legacy_target"
@@ -1176,12 +1176,14 @@ repair_previous_persistence() {
 }
 
 restore_real_previous() {
-    local current current_release prior=none prior_release=
+    local current current_release current_commit prior=none prior_release='' prior_commit=''
     if read_value activation_previous_target; then prior=$REPLY; fi
     if read_value activation_previous_release; then prior_release=$REPLY; fi
+    if read_value previous_commit; then prior_commit=$REPLY; fi
     current=$(selected_target)
     if [ "$current" = stable ]; then
         current_release=$(metadata_value "$stable" release || true)
+        current_commit=$(metadata_value "$stable" commit || true)
         if [ "$current_release" = "$release_id" ]; then
             if [ -e "$candidate" ] || [ -L "$candidate" ]; then
                 echo "::error::Candidate retention path already exists during rollback." >&2
@@ -1192,7 +1194,8 @@ restore_real_previous() {
             [ "$(metadata_value "$candidate" release || true)" = "$release_id" ] || { echo "::error::Candidate identity was not retained during rollback." >&2; return 1; }
             write_value phase rollback_after_candidate_rename
             current=none
-        elif [ "$prior" != none ] && [ -n "$prior_release" ] && [ "$current_release" = "$prior_release" ]; then
+        elif [ "$prior" != none ] && [ -n "$prior_release" ] && [ -n "$prior_commit" ] \
+            && [ "$current_release" = "$prior_release" ] && [ "$current_commit" = "$prior_commit" ]; then
             return 0
         elif [ "$prior" = none ] && [ "$current_release" != "$release_id" ]; then
             # Activation did not reach the first rename; the exact prior real
@@ -1209,6 +1212,7 @@ restore_real_previous() {
         write_value phase rollback_before_prior_rename
         mv -T "$HOME/$prior" "$stable"
         [ "$(metadata_value "$stable" release || true)" = "$prior_release" ] || { echo "::error::Prior release identity was not restored during rollback." >&2; return 1; }
+        [ "$(metadata_value "$stable" commit || true)" = "$prior_commit" ] || { echo "::error::Prior release commit was not restored during rollback." >&2; return 1; }
         write_value previous_target stable
         write_value phase rollback_after_prior_rename
         return 0

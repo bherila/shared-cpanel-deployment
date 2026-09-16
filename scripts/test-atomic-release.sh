@@ -426,6 +426,13 @@ bash "$script" finalize app real-pre-risk "$php" >/dev/null
 check "real-directory pre-risk recovery restores old code serving" test "$(status_field real-pre-risk live_state)" = serving
 check "real-directory pre-risk recovery restores cron" grep -Fq '# JOB:app-scheduler' "$CRONTAB_FILE"
 
+setup; make_legacy; begin_and_upload_directory real-adoption-marker; preflight_quiesce real-adoption-marker
+transaction="$HOME/.deployments/app/state/real-adoption-marker"; adopted_release=legacy-interrupted-real-adoption-marker; adopted_target=".deployments/app/releases/$adopted_release"; printf '%s\n' "$adopted_target" >"$transaction/conversion_target"; printf 'converting\n' >"$transaction/phase"; mv -T "$HOME/app/storage" "$HOME/.deployments/app/shared/storage"; ln -s "$HOME/.deployments/app/shared/storage" "$HOME/app/storage"; printf '%s\n' "$adopted_release" >"$transaction/previous_release"; printf '%s\n' "$commit" >"$transaction/previous_commit"; printf 'release=%s\ncommit=%s\n' "$adopted_release" "$commit" >"$HOME/app/.deploy-release"
+bash "$script" finalize app real-adoption-marker "$php" >/dev/null
+check "interrupted first real-directory metadata adoption proves exact prior release" test "$(status_field real-adoption-marker live_release)" = "$adopted_release"
+check "interrupted first real-directory metadata adoption restores serving" test "$(status_field real-adoption-marker live_state)" = serving
+check "interrupted first real-directory metadata adoption restores cron" grep -Fq '# JOB:app-scheduler' "$CRONTAB_FILE"
+
 setup; make_legacy; begin_and_upload_directory real-before-prior-rename; preflight_quiesce real-before-prior-rename; bash "$script" prepare app real-before-prior-rename "$php" >/dev/null; bash "$script" risk app real-before-prior-rename "$php" >/dev/null
 printf 'activating_before_prior_rename\n' >"$HOME/.deployments/app/state/real-before-prior-rename/phase"
 bash "$script" finalize app real-before-prior-rename "$php" >/dev/null
@@ -451,6 +458,13 @@ bash "$script" finalize app real-rollback "$php" >/dev/null
 check "real-directory rollback restores exact prior metadata" test "$(status_field real-rollback live_release)" = "$prior_real_release"
 check "real-directory rollback proves prior code serving" test "$(status_field real-rollback live_state)" = serving
 check_expr "real-directory rollback never restores a symlinked vhost ancestor" '[ -d "$HOME/app" ] && [ ! -L "$HOME/app" ]'
+
+setup; make_legacy; begin_and_upload_directory real-rollback-commit-tamper rollback; preflight_quiesce real-rollback-commit-tamper; bash "$script" prepare app real-rollback-commit-tamper "$php" >/dev/null; bash "$script" risk app real-rollback-commit-tamper "$php" >/dev/null; bash "$script" activate app real-rollback-commit-tamper "$php" >/dev/null
+transaction="$HOME/.deployments/app/state/real-rollback-commit-tamper"; prior_target=$(cat "$transaction/previous_target"); mv -T "$HOME/app" "$candidate"; mv -T "$HOME/$prior_target" "$HOME/app"; sed -i 's/^commit=.*/commit=deadbeef/' "$HOME/app/.deploy-release"; : >"$PHP_LOG"
+bash "$script" finalize app real-rollback-commit-tamper "$php" >/dev/null 2>&1
+check "rollback refuses an already-restored prior directory with a changed commit" test "$?" -ne 0
+check "rollback commit mismatch never runs artisan up" sh -c '! grep -Fq "artisan up" "$1"' sh "$PHP_LOG"
+check_expr "rollback commit mismatch keeps cron paused and retains its lock" '[ ! -s "$CRONTAB_FILE" ] && [ -d "$HOME/.deployments/app/deploy.lock" ]'
 
 setup; make_legacy; begin_and_upload_directory real-candidate-tamper; preflight_quiesce real-candidate-tamper; bash "$script" prepare app real-candidate-tamper "$php" >/dev/null; bash "$script" risk app real-candidate-tamper "$php" >/dev/null; bash "$script" activate app real-candidate-tamper "$php" >/dev/null
 transaction="$HOME/.deployments/app/state/real-candidate-tamper"; prior_target=$(cat "$transaction/previous_target"); mv -T "$HOME/app" "$candidate"; mv -T "$HOME/$prior_target" "$HOME/app"; : >"$PHP_LOG"
