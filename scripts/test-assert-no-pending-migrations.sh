@@ -60,5 +60,10 @@ rm "$deploy_home/app/artisan"
 run app "$php" ''; missing_artisan=$?
 check "a missing artisan file fails" '[ "$missing_artisan" -eq 1 ]'
 
+mkdir -p "$deploy_home/.deployments/app/releases/release-1"
+: >"$deploy_home/.deployments/app/releases/release-1/artisan"
+run .deployments/app/releases/release-1 "$php" ''; status=$?
+check "a managed atomic candidate can verify migrations" '[ "$status" -eq 0 ]'
+
 echo "failures: $fails"
 exit "$fails"

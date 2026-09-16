@@ -28,9 +28,13 @@ source_file=$2
 shift 2
 
 case $app_dir in
-    '' | . | .. | .* | *[!A-Za-z0-9._-]*)
-        echo "::error::The application directory must be a plain directory name under the account home." >&2
-        exit 2 ;;
+    '' | . | .. | /* | *..* | *[!A-Za-z0-9._/-]*) echo "::error::The application path is unsafe." >&2; exit 2 ;;
+    .deployments/*/releases/*)
+        IFS=/ read -r prefix managed_app releases_component managed_release extra <<<"$app_dir"
+        [ "$prefix" = .deployments ] && [ "$releases_component" = releases ] && [ -z "$extra" ] \
+            || { echo "::error::The managed release path is malformed." >&2; exit 2; }
+        case "$managed_app:$managed_release" in *[!A-Za-z0-9._:-]* | :* | *:) echo "::error::The managed release path is malformed." >&2; exit 2 ;; esac ;;
+    .* | */*) echo "::error::The application path must be a plain account-home name or a managed release." >&2; exit 2 ;;
 esac
 
 valid_key() {

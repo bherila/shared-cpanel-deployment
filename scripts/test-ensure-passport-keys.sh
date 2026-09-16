@@ -59,5 +59,16 @@ run example-laravel relative/php storage/app/private/oauth; relative_php=$?
 run example-laravel "$php" ../outside; unsafe_path=$?
 check "relative PHP and unsafe key paths are refused" '[ "$relative_php" -eq 2 ] && [ "$unsafe_path" -eq 2 ]'
 
+setup
+managed="$HOME/.deployments/example-laravel/releases/release-1"
+shared="$HOME/.deployments/example-laravel/shared"
+mkdir -p "$managed" "$shared/storage"
+: >"$managed/artisan"
+ln -s "$shared/storage" "$managed/storage"
+keys="$shared/storage/app/private/oauth"
+run .deployments/example-laravel/releases/release-1 "$php" storage/app/private/oauth .deployments/example-laravel/shared; status=$?
+check "an atomic candidate may traverse only its declared shared root" \
+    '[ "$status" -eq 0 ] && [ -s "$keys/oauth-private.key" ] && [ -s "$keys/oauth-public.key" ]'
+
 echo "failures: $fails"
 exit "$fails"

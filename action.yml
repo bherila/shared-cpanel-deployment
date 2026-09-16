@@ -1,9 +1,8 @@
 name: Deploy Laravel to cPanel
 description: >-
-  Deploy a Laravel application to its own directory on a shared cPanel account: pinned SSH, the site's
-  PHP handler, a guarded rsync --delete, .env checks, migrations and config cache, the account crontab,
-  and post-deploy health and PHP checks. Every step that touches shared state is scoped to this
-  application's directory, its crontab lines, and its .env.
+  Deploy Laravel to versioned releases on a shared cPanel account: pinned SSH, guarded candidate upload,
+  persistent runtime data, candidate migrations and checks, atomic activation, scoped cron, recovery,
+  and exact live-release reporting. Legacy in-place deployment remains an explicit escape hatch.
 author: bherila
 
 branding:
@@ -42,6 +41,40 @@ inputs:
     default: '8.5'
   php-binary:
     description: PHP CLI on the host. Defaults to cPanel's ea-php binary for php-version.
+    required: false
+    default: ''
+  deployment-mode:
+    description: >-
+      atomic (v2 default) builds and validates a versioned candidate before selecting it. in-place is
+      the legacy escape hatch and retains the v1 upload-then-migrate failure boundary.
+    required: false
+    default: atomic
+  persistent-paths:
+    description: >-
+      Newline-separated runtime directories shared by every atomic release. storage is the default;
+      authoritative application-specific directories must be listed explicitly.
+    required: false
+    default: storage
+  retain-releases:
+    description: Number of versioned releases to retain after a healthy atomic deployment (minimum 2).
+    required: false
+    default: '3'
+  deploy-lock-timeout:
+    description: >-
+      Diagnostic expected run duration recorded with the lock. Atomic v2 never takes over a lock by
+      age; stale recovery is deliberately manual after proving the prior run and processes stopped.
+    required: false
+    default: '21600'
+  failure-policy:
+    description: >-
+      maintenance keeps selected code down after a risky failure. rollback restores and serves the
+      prior release, and is safe only when every database change is backward compatible.
+    required: false
+    default: maintenance
+  initial-live-commit:
+    description: >-
+      Exact source revision currently deployed, required only for the first atomic conversion of an
+      existing in-place directory so failure reporting can identify the retained old code.
     required: false
     default: ''
 
@@ -161,12 +194,42 @@ inputs:
     default: ''
   pre-migrate-script:
     description: >-
-      Optional script in the checkout, run on the host after .env and before migration. With
-      before-upload it runs against the previous release. Receives <deploy-dir> <php>.
+      Optional host script receiving <app-path> <php> [stable-path]. Atomic mode runs it immediately
+      after the durable database-risk marker and before migrations.
+      In-place mode preserves the v1 two-argument contract.
     required: false
     default: ''
   post-deploy-script:
-    description: Optional script in the checkout, run on the host after artisan and cron. Receives <deploy-dir> <php>.
+    description: >-
+      Optional host script receiving <app-path> <php>. Atomic mode runs it against the candidate before
+      activation; in-place mode preserves the v1 timing after Artisan and cron.
+    required: false
+    default: ''
+  pre-activate-script:
+    description: Optional host script run after candidate post-deploy checks and before selection. Receives <candidate-path> <php> <stable-path>.
+    required: false
+    default: ''
+  post-activate-script:
+    description: Optional host script run after atomic selection while the stable path remains in maintenance. Receives <stable-path> <php> <candidate-path>.
+    required: false
+    default: ''
+  quiesce-script:
+    description: >-
+      Optional host script run after cron is paused and selected old code is down, but before any
+      persistent path is moved. Use it to wait for already-running workers. Receives
+      <candidate-path> <php> <stable-path>.
+    required: false
+    default: ''
+  allow-unverified-quiescence:
+    description: >-
+      Explicitly acknowledge that an existing app has no running scheduler/queue/PHP process to drain.
+      Default false requires quiesce-script for every existing atomic deployment; fresh installs skip it.
+    required: false
+    default: 'false'
+  verification-script:
+    description: >-
+      Optional script from the checkout run on the Actions runner after live HTTP/PHP checks. It receives
+      deployment details through DEPLOY_* environment variables and may perform OAuth, MCP, queue or other probes.
     required: false
     default: ''
 
@@ -175,6 +238,12 @@ inputs:
     description: Install this application's cron lines in the account crontab.
     required: false
     default: 'true'
+  post-activate-manages-cron:
+    description: >-
+      When install-cron is false, declare that post-activate-script replaces the paused application
+      cron lines. False restores the exact pre-deployment lines before serving.
+    required: false
+    default: 'false'
   cron-memory-limit:
     description: memory_limit for every managed Artisan cron line, including schedulers and workers (the CLI default on cPanel is 128M).
     required: false
@@ -211,6 +280,18 @@ outputs:
   php-binary:
     description: The PHP CLI path used on the host.
     value: ${{ steps.resolve.outputs.php }}
+  release-id:
+    description: Candidate release id for atomic mode; empty for an in-place deployment.
+    value: ${{ steps.resolve.outputs.release-id }}
+  live-release:
+    description: Release actually selected when the action finished, including after recovery.
+    value: ${{ steps.atomic-finalize.outputs.live_release }}
+  live-commit:
+    description: Source revision recorded by the selected release.
+    value: ${{ steps.atomic-finalize.outputs.live_commit }}
+  live-state:
+    description: Whether the selected release is serving, in maintenance, absent or unavailable.
+    value: ${{ steps.atomic-finalize.outputs.live_state }}
 
 runs:
   using: composite
@@ -219,16 +300,32 @@ runs:
       name: Resolve and validate inputs
       shell: bash
       env:
+        DEPLOY_DIR_INPUT: ${{ inputs.deploy-dir }}
         PHP_VERSION_INPUT: ${{ inputs.php-version }}
         PHP_BINARY_INPUT: ${{ inputs.php-binary }}
+        DEPLOYMENT_MODE: ${{ inputs.deployment-mode }}
         MIGRATION_ORDER: ${{ inputs.migration-order }}
         RUN_MIGRATIONS: ${{ inputs.run-migrations }}
         ARTISAN_MEMORY_LIMIT: ${{ inputs.artisan-memory-limit }}
+        RETAIN_RELEASES: ${{ inputs.retain-releases }}
+        LOCK_TIMEOUT: ${{ inputs.deploy-lock-timeout }}
+        FAILURE_POLICY: ${{ inputs.failure-policy }}
+        INITIAL_LIVE_COMMIT: ${{ inputs.initial-live-commit }}
+        PASSPORT_KEY_DIRECTORY: ${{ inputs.passport-key-directory }}
+        PERSISTENT_PATHS: ${{ inputs.persistent-paths }}
+        INSTALL_CRON: ${{ inputs.install-cron }}
+        POST_ACTIVATE_MANAGES_CRON: ${{ inputs.post-activate-manages-cron }}
+        POST_ACTIVATE_SCRIPT: ${{ inputs.post-activate-script }}
+        SOURCE_COMMIT: ${{ github.sha }}
+        RUN_ID: ${{ github.run_id }}
+        RUN_ATTEMPT: ${{ github.run_attempt }}
         FLAGS: >-
           keep-runtime-storage=${{ inputs.keep-runtime-storage }}
           set-php-handler=${{ inputs.set-php-handler }}
           run-migrations=${{ inputs.run-migrations }}
           install-cron=${{ inputs.install-cron }}
+          post-activate-manages-cron=${{ inputs.post-activate-manages-cron }}
+          allow-unverified-quiescence=${{ inputs.allow-unverified-quiescence }}
           verify-web-php=${{ inputs.verify-web-php }}
       run: |
         set -euo pipefail
@@ -238,6 +335,14 @@ runs:
             *) echo "::error::${flag%%=*} must be 'true' or 'false', not '${flag#*=}'." >&2; exit 2 ;;
           esac
         done
+        case $DEPLOY_DIR_INPUT in
+          '' | . | .. | .* | *[!A-Za-z0-9._-]*)
+            echo "::error::deploy-dir must be a plain, non-hidden account-home name." >&2; exit 2 ;;
+        esac
+        case $DEPLOYMENT_MODE in
+          atomic | in-place) ;;
+          *) echo "::error::deployment-mode must be 'atomic' or 'in-place', not '$DEPLOYMENT_MODE'." >&2; exit 2 ;;
+        esac
         case $PHP_VERSION_INPUT in
           [0-9].[0-9] | [0-9].[0-9][0-9]) ;;
           *) echo "::error::php-version must be major.minor, e.g. 8.5, not '$PHP_VERSION_INPUT'." >&2; exit 2 ;;
@@ -251,6 +356,10 @@ runs:
           after-upload | before-upload) ;;
           *) echo "::error::migration-order must be 'after-upload' or 'before-upload', not '$MIGRATION_ORDER'." >&2; exit 2 ;;
         esac
+        if [ "$DEPLOYMENT_MODE" = atomic ] && [ "$MIGRATION_ORDER" != after-upload ]; then
+          echo "::error::migration-order is a legacy in-place option; atomic mode always migrates the candidate before activation." >&2
+          exit 2
+        fi
         if [ "$MIGRATION_ORDER" = before-upload ] && [ "$RUN_MIGRATIONS" != true ]; then
           echo "::error::migration-order 'before-upload' requires run-migrations: true." >&2
           exit 2
@@ -259,7 +368,48 @@ runs:
           echo "::error::artisan-memory-limit must be empty, -1, or a positive K/M/G value such as 1G." >&2
           exit 2
         fi
+        if [[ ! $RETAIN_RELEASES =~ ^[0-9]+$ ]] || [ "$RETAIN_RELEASES" -lt 2 ]; then
+          echo "::error::retain-releases must be an integer of at least 2." >&2; exit 2
+        fi
+        if [[ ! $LOCK_TIMEOUT =~ ^[1-9][0-9]*$ ]]; then
+          echo "::error::deploy-lock-timeout must be positive seconds." >&2; exit 2
+        fi
+        case $FAILURE_POLICY in
+          maintenance | rollback) ;;
+          *) echo "::error::failure-policy must be 'maintenance' or 'rollback'." >&2; exit 2 ;;
+        esac
+        if [ -n "$INITIAL_LIVE_COMMIT" ] && [[ ! $INITIAL_LIVE_COMMIT =~ ^[0-9A-Fa-f]{7,64}$ ]]; then
+          echo "::error::initial-live-commit must be empty or a hexadecimal source revision." >&2; exit 2
+        fi
+        if [ "$DEPLOYMENT_MODE" = atomic ] && [ -n "$PASSPORT_KEY_DIRECTORY" ]; then
+          covered=false
+          while IFS= read -r raw || [ -n "$raw" ]; do
+            path=${raw#"${raw%%[![:space:]]*}"}; path=${path%"${path##*[![:space:]]}"}
+            [ -n "$path" ] || continue
+            case "$PASSPORT_KEY_DIRECTORY/" in "$path/"*) covered=true ;; esac
+          done <<<"$PERSISTENT_PATHS"
+          [ "$covered" = true ] || {
+            echo "::error::passport-key-directory must be inside a declared persistent-path in atomic mode." >&2
+            exit 2
+          }
+        fi
+        if [ "$POST_ACTIVATE_MANAGES_CRON" = true ]; then
+          [ "$DEPLOYMENT_MODE" = atomic ] && [ "$INSTALL_CRON" = false ] && [ -n "$POST_ACTIVATE_SCRIPT" ] || {
+            echo "::error::post-activate-manages-cron requires atomic mode, install-cron:false, and post-activate-script." >&2
+            exit 2
+          }
+        fi
         echo "php=$php" >>"$GITHUB_OUTPUT"
+        if [ "$DEPLOYMENT_MODE" = atomic ]; then
+          [[ $SOURCE_COMMIT =~ ^[0-9A-Fa-f]{7,64}$ ]] || { echo "::error::github.sha is not a hexadecimal revision." >&2; exit 2; }
+          [[ $RUN_ID =~ ^[0-9]+$ && $RUN_ATTEMPT =~ ^[0-9]+$ ]] || { echo "::error::GitHub run identity is unavailable." >&2; exit 2; }
+          release_id="${SOURCE_COMMIT:0:12}-${RUN_ID}-${RUN_ATTEMPT}"
+          echo "release-id=$release_id" >>"$GITHUB_OUTPUT"
+          echo "app-dir=.deployments/$DEPLOY_DIR_INPUT/releases/$release_id" >>"$GITHUB_OUTPUT"
+        else
+          echo 'release-id=' >>"$GITHUB_OUTPUT"
+          echo "app-dir=$DEPLOY_DIR_INPUT" >>"$GITHUB_OUTPUT"
+        fi
 
     - id: ssh
       name: Configure SSH
@@ -282,7 +432,7 @@ runs:
       run: bash "$GITHUB_ACTION_PATH/scripts/htaccess.sh"
 
     - name: Upload migrations before application code
-      if: inputs.migration-order == 'before-upload'
+      if: inputs.deployment-mode == 'in-place' && inputs.migration-order == 'before-upload'
       shell: bash
       env:
         DEPLOY_TARGET: ${{ steps.ssh.outputs.target }}
@@ -290,7 +440,7 @@ runs:
       run: bash "$GITHUB_ACTION_PATH/scripts/rsync-migrations.sh"
 
     - name: Install and check .env before migration
-      if: inputs.migration-order == 'before-upload'
+      if: inputs.deployment-mode == 'in-place' && inputs.migration-order == 'before-upload'
       shell: bash
       env:
         TARGET: ${{ steps.ssh.outputs.target }}
@@ -330,7 +480,7 @@ runs:
           <"$GITHUB_ACTION_PATH/scripts/configure-env.sh"
 
     - name: Ensure Passport signing keys before application upload
-      if: inputs.migration-order == 'before-upload' && inputs.passport-key-directory != ''
+      if: inputs.deployment-mode == 'in-place' && inputs.migration-order == 'before-upload' && inputs.passport-key-directory != ''
       shell: bash
       env:
         TARGET: ${{ steps.ssh.outputs.target }}
@@ -343,7 +493,7 @@ runs:
           <"$GITHUB_ACTION_PATH/scripts/ensure-passport-keys.sh"
 
     - name: Run the pre-migrate script against the previous release
-      if: inputs.migration-order == 'before-upload' && inputs.pre-migrate-script != ''
+      if: inputs.deployment-mode == 'in-place' && inputs.migration-order == 'before-upload' && inputs.pre-migrate-script != ''
       shell: bash
       env:
         TARGET: ${{ steps.ssh.outputs.target }}
@@ -356,7 +506,7 @@ runs:
         ssh "$TARGET" "bash -s -- $(printf '%q ' "$DEPLOY_DIR" "$PHP_BINARY")" <"$SCRIPT"
 
     - name: Migrate before application code
-      if: inputs.migration-order == 'before-upload'
+      if: inputs.deployment-mode == 'in-place' && inputs.migration-order == 'before-upload'
       shell: bash
       env:
         TARGET: ${{ steps.ssh.outputs.target }}
@@ -369,7 +519,7 @@ runs:
           <"$GITHUB_ACTION_PATH/scripts/remote-artisan.sh"
 
     - name: Verify migrations completed before application upload
-      if: inputs.migration-order == 'before-upload'
+      if: inputs.deployment-mode == 'in-place' && inputs.migration-order == 'before-upload'
       shell: bash
       env:
         TARGET: ${{ steps.ssh.outputs.target }}
@@ -381,7 +531,130 @@ runs:
         ssh "$TARGET" "bash -s -- $(printf '%q ' "$DEPLOY_DIR" "$PHP_BINARY" "$ARTISAN_MEMORY_LIMIT")" \
           <"$GITHUB_ACTION_PATH/scripts/assert-no-pending-migrations.sh"
 
-    - name: Upload with guarded rsync
+    - name: Start the remote atomic transaction
+      if: inputs.deployment-mode == 'atomic'
+      shell: bash
+      env:
+        TARGET: ${{ steps.ssh.outputs.target }}
+        DEPLOY_DIR: ${{ inputs.deploy-dir }}
+        RELEASE_ID: ${{ steps.resolve.outputs.release-id }}
+        SOURCE_COMMIT: ${{ github.sha }}
+        LOCK_TIMEOUT: ${{ inputs.deploy-lock-timeout }}
+        RETAIN_RELEASES: ${{ inputs.retain-releases }}
+        FAILURE_POLICY: ${{ inputs.failure-policy }}
+        INITIAL_LIVE_COMMIT: ${{ inputs.initial-live-commit }}
+        PERSISTENT_PATHS: ${{ inputs.persistent-paths }}
+      run: |
+        set -euo pipefail
+        paths=()
+        while IFS= read -r raw || [ -n "$raw" ]; do
+          path=${raw#"${raw%%[![:space:]]*}"}
+          path=${path%"${path##*[![:space:]]}"}
+          [ -n "$path" ] && paths+=("$path")
+        done <<<"$PERSISTENT_PATHS"
+        [ "${#paths[@]}" -gt 0 ] || { echo "::error::persistent-paths must name at least one path." >&2; exit 2; }
+        ssh "$TARGET" "bash -s -- $(printf '%q ' begin "$DEPLOY_DIR" "$RELEASE_ID" "$SOURCE_COMMIT" "$LOCK_TIMEOUT" "$RETAIN_RELEASES" "$FAILURE_POLICY" "$INITIAL_LIVE_COMMIT" "${paths[@]}")" \
+          <"$GITHUB_ACTION_PATH/scripts/atomic-release.sh"
+
+    - name: Verify remote capacity before atomic upload
+      if: inputs.deployment-mode == 'atomic'
+      shell: bash
+      env:
+        TARGET: ${{ steps.ssh.outputs.target }}
+        DEPLOY_DIR: ${{ inputs.deploy-dir }}
+        RELEASE_ID: ${{ steps.resolve.outputs.release-id }}
+        DEPLOY_PATHS: ${{ inputs.paths }}
+      run: |
+        set -euo pipefail
+        paths=()
+        while IFS= read -r raw || [ -n "$raw" ]; do
+          path=${raw#"${raw%%[![:space:]]*}"}; path=${path%"${path##*[![:space:]]}"}
+          [ -n "$path" ] && paths+=("$path")
+        done <<<"$DEPLOY_PATHS"
+        [ "${#paths[@]}" -gt 0 ] || { echo "::error::paths must name at least one upload path." >&2; exit 2; }
+        required_kib=$(du -sk -- "${paths[@]}" | awk '{ total += $1 } END { print total + 0 }')
+        [ "$required_kib" -gt 0 ] || required_kib=1
+        ssh "$TARGET" "bash -s -- $(printf '%q ' capacity "$DEPLOY_DIR" "$RELEASE_ID" "$required_kib")" \
+          <"$GITHUB_ACTION_PATH/scripts/atomic-release.sh"
+
+    - name: Upload the atomic candidate
+      if: inputs.deployment-mode == 'atomic'
+      shell: bash
+      env:
+        DEPLOY_TARGET: ${{ steps.ssh.outputs.target }}
+        DEPLOY_DIR: ${{ inputs.deploy-dir }}
+        DEPLOY_RELEASE_ID: ${{ steps.resolve.outputs.release-id }}
+        DEPLOY_PATHS: ${{ inputs.paths }}
+        DEPLOY_EXCLUDES: ${{ inputs.excludes }}
+      run: bash "$GITHUB_ACTION_PATH/scripts/rsync-atomic-release.sh"
+
+    - id: atomic-preflight
+      name: Preflight the atomic conversion and host capacity
+      if: inputs.deployment-mode == 'atomic'
+      shell: bash
+      env:
+        TARGET: ${{ steps.ssh.outputs.target }}
+        DEPLOY_DIR: ${{ inputs.deploy-dir }}
+        RELEASE_ID: ${{ steps.resolve.outputs.release-id }}
+        WEBROOT_LINK: ${{ inputs.webroot-symlink }}
+        QUIESCE_SCRIPT: ${{ inputs.quiesce-script }}
+        ALLOW_UNVERIFIED_QUIESCENCE: ${{ inputs.allow-unverified-quiescence }}
+      run: |
+        set -euo pipefail
+        output=$(ssh "$TARGET" "bash -s -- $(printf '%q ' preflight "$DEPLOY_DIR" "$RELEASE_ID" "$WEBROOT_LINK")" \
+          <"$GITHUB_ACTION_PATH/scripts/atomic-release.sh")
+        printf '%s\n' "$output"
+        conversion=$(sed -n 's/^conversion_required=//p' <<<"$output" | tail -1)
+        case $conversion in true | false) echo "conversion_required=$conversion" >>"$GITHUB_OUTPUT" ;; *) echo "::error::Preflight did not report conversion state." >&2; exit 1 ;; esac
+        existing=$(sed -n 's/^existing_release=//p' <<<"$output" | tail -1)
+        case $existing in true | false) echo "existing_release=$existing" >>"$GITHUB_OUTPUT" ;; *) echo "::error::Preflight did not report existing-release state." >&2; exit 1 ;; esac
+        if [ "$existing" = true ] && [ -z "$QUIESCE_SCRIPT" ] && [ "$ALLOW_UNVERIFIED_QUIESCENCE" != true ]; then
+          echo "::error::Existing atomic deployments require quiesce-script, or explicit allow-unverified-quiescence:true." >&2
+          exit 2
+        fi
+
+    - name: Quiesce the selected atomic deployment
+      if: inputs.deployment-mode == 'atomic' && steps.atomic-preflight.outputs.conversion_required == 'true'
+      shell: bash
+      env:
+        TARGET: ${{ steps.ssh.outputs.target }}
+        DEPLOY_DIR: ${{ inputs.deploy-dir }}
+        RELEASE_ID: ${{ steps.resolve.outputs.release-id }}
+        PHP_BINARY: ${{ steps.resolve.outputs.php }}
+      run: |
+        set -euo pipefail
+        ssh "$TARGET" "bash -s -- $(printf '%q ' quiesce "$DEPLOY_DIR" "$RELEASE_ID" "$PHP_BINARY")" \
+          <"$GITHUB_ACTION_PATH/scripts/atomic-release.sh"
+
+    - name: Drain processes before persistent conversion
+      if: inputs.deployment-mode == 'atomic' && steps.atomic-preflight.outputs.conversion_required == 'true' && inputs.quiesce-script != ''
+      shell: bash
+      env:
+        TARGET: ${{ steps.ssh.outputs.target }}
+        CANDIDATE_DIR: ${{ steps.resolve.outputs.app-dir }}
+        PHP_BINARY: ${{ steps.resolve.outputs.php }}
+        STABLE_DIR: ${{ inputs.deploy-dir }}
+        SCRIPT: ${{ inputs.quiesce-script }}
+      run: |
+        set -euo pipefail
+        [ -f "$SCRIPT" ] || { echo "::error::quiesce-script '$SCRIPT' does not exist in the checkout." >&2; exit 2; }
+        ssh "$TARGET" "bash -s -- $(printf '%q ' "$CANDIDATE_DIR" "$PHP_BINARY" "$STABLE_DIR")" <"$SCRIPT"
+
+    - name: Prepare shared runtime paths and the atomic candidate
+      if: inputs.deployment-mode == 'atomic'
+      shell: bash
+      env:
+        TARGET: ${{ steps.ssh.outputs.target }}
+        DEPLOY_DIR: ${{ inputs.deploy-dir }}
+        RELEASE_ID: ${{ steps.resolve.outputs.release-id }}
+        PHP_BINARY: ${{ steps.resolve.outputs.php }}
+      run: |
+        set -euo pipefail
+        ssh "$TARGET" "bash -s -- $(printf '%q ' prepare "$DEPLOY_DIR" "$RELEASE_ID" "$PHP_BINARY")" \
+          <"$GITHUB_ACTION_PATH/scripts/atomic-release.sh"
+
+    - name: Upload with guarded in-place rsync
+      if: inputs.deployment-mode == 'in-place'
       shell: bash
       env:
         DEPLOY_TARGET: ${{ steps.ssh.outputs.target }}
@@ -392,7 +665,7 @@ runs:
       run: bash "$GITHUB_ACTION_PATH/scripts/rsync-deploy.sh"
 
     - name: Ensure the webroot symlink
-      if: inputs.webroot-symlink != ''
+      if: inputs.deployment-mode == 'in-place' && inputs.webroot-symlink != ''
       shell: bash
       env:
         TARGET: ${{ steps.ssh.outputs.target }}
@@ -407,7 +680,7 @@ runs:
       shell: bash
       env:
         TARGET: ${{ steps.ssh.outputs.target }}
-        DEPLOY_DIR: ${{ inputs.deploy-dir }}
+        DEPLOY_DIR: ${{ steps.resolve.outputs.app-dir }}
         ENV_SOURCE: ${{ inputs.env-source }}
         APP_ENV_VALUE: ${{ inputs.app-env }}
         APP_URL_VALUE: ${{ inputs.app-url }}
@@ -447,12 +720,13 @@ runs:
       shell: bash
       env:
         TARGET: ${{ steps.ssh.outputs.target }}
-        DEPLOY_DIR: ${{ inputs.deploy-dir }}
+        DEPLOY_DIR: ${{ steps.resolve.outputs.app-dir }}
+        SHARED_ROOT: ${{ inputs.deployment-mode == 'atomic' && format('.deployments/{0}/shared', inputs.deploy-dir) || '' }}
         PHP_BINARY: ${{ steps.resolve.outputs.php }}
         KEY_DIRECTORY: ${{ inputs.passport-key-directory }}
       run: |
         set -euo pipefail
-        ssh "$TARGET" "bash -s -- $(printf '%q ' "$DEPLOY_DIR" "$PHP_BINARY" "$KEY_DIRECTORY")" \
+        ssh "$TARGET" "bash -s -- $(printf '%q ' "$DEPLOY_DIR" "$PHP_BINARY" "$KEY_DIRECTORY" "$SHARED_ROOT")" \
           <"$GITHUB_ACTION_PATH/scripts/ensure-passport-keys.sh"
 
     - name: Install private branding
@@ -460,7 +734,7 @@ runs:
       shell: bash
       env:
         TARGET: ${{ steps.ssh.outputs.target }}
-        DEPLOY_DIR: ${{ inputs.deploy-dir }}
+        DEPLOY_DIR: ${{ steps.resolve.outputs.app-dir }}
         BRANDING_SOURCE: ${{ inputs.branding-source }}
         BRANDING_FILES: ${{ inputs.branding-files }}
       run: |
@@ -475,24 +749,70 @@ runs:
         ssh "$TARGET" "bash -s -- $(printf '%q ' "$DEPLOY_DIR" "$BRANDING_SOURCE" "${files[@]}")" \
           <"$GITHUB_ACTION_PATH/scripts/install-branding.sh"
 
+    - name: Quiesce an already-versioned atomic deployment
+      if: inputs.deployment-mode == 'atomic' && steps.atomic-preflight.outputs.conversion_required == 'false'
+      shell: bash
+      env:
+        TARGET: ${{ steps.ssh.outputs.target }}
+        DEPLOY_DIR: ${{ inputs.deploy-dir }}
+        RELEASE_ID: ${{ steps.resolve.outputs.release-id }}
+        PHP_BINARY: ${{ steps.resolve.outputs.php }}
+      run: |
+        set -euo pipefail
+        ssh "$TARGET" "bash -s -- $(printf '%q ' quiesce "$DEPLOY_DIR" "$RELEASE_ID" "$PHP_BINARY")" \
+          <"$GITHUB_ACTION_PATH/scripts/atomic-release.sh"
+
+    - name: Drain processes before the atomic risk boundary
+      if: inputs.deployment-mode == 'atomic' && steps.atomic-preflight.outputs.conversion_required == 'false' && steps.atomic-preflight.outputs.existing_release == 'true' && inputs.quiesce-script != ''
+      shell: bash
+      env:
+        TARGET: ${{ steps.ssh.outputs.target }}
+        CANDIDATE_DIR: ${{ steps.resolve.outputs.app-dir }}
+        PHP_BINARY: ${{ steps.resolve.outputs.php }}
+        STABLE_DIR: ${{ inputs.deploy-dir }}
+        SCRIPT: ${{ inputs.quiesce-script }}
+      run: |
+        set -euo pipefail
+        [ -f "$SCRIPT" ] || { echo "::error::quiesce-script '$SCRIPT' does not exist in the checkout." >&2; exit 2; }
+        ssh "$TARGET" "bash -s -- $(printf '%q ' "$CANDIDATE_DIR" "$PHP_BINARY" "$STABLE_DIR")" <"$SCRIPT"
+
+    - name: Enter the atomic database-risk boundary
+      if: inputs.deployment-mode == 'atomic'
+      shell: bash
+      env:
+        TARGET: ${{ steps.ssh.outputs.target }}
+        DEPLOY_DIR: ${{ inputs.deploy-dir }}
+        RELEASE_ID: ${{ steps.resolve.outputs.release-id }}
+        PHP_BINARY: ${{ steps.resolve.outputs.php }}
+      run: |
+        set -euo pipefail
+        ssh "$TARGET" "bash -s -- $(printf '%q ' risk "$DEPLOY_DIR" "$RELEASE_ID" "$PHP_BINARY")" \
+          <"$GITHUB_ACTION_PATH/scripts/atomic-release.sh"
+
     - name: Run the pre-migrate script
       if: inputs.migration-order == 'after-upload' && inputs.pre-migrate-script != ''
       shell: bash
       env:
         TARGET: ${{ steps.ssh.outputs.target }}
-        DEPLOY_DIR: ${{ inputs.deploy-dir }}
+        DEPLOY_DIR: ${{ steps.resolve.outputs.app-dir }}
         PHP_BINARY: ${{ steps.resolve.outputs.php }}
+        DEPLOYMENT_MODE: ${{ inputs.deployment-mode }}
+        STABLE_DIR: ${{ inputs.deploy-dir }}
         SCRIPT: ${{ inputs.pre-migrate-script }}
       run: |
         set -euo pipefail
         [ -f "$SCRIPT" ] || { echo "::error::pre-migrate-script '$SCRIPT' does not exist in the checkout." >&2; exit 2; }
-        ssh "$TARGET" "bash -s -- $(printf '%q ' "$DEPLOY_DIR" "$PHP_BINARY")" <"$SCRIPT"
+        if [ "$DEPLOYMENT_MODE" = atomic ]; then
+          ssh "$TARGET" "bash -s -- $(printf '%q ' "$DEPLOY_DIR" "$PHP_BINARY" "$STABLE_DIR")" <"$SCRIPT"
+        else
+          ssh "$TARGET" "bash -s -- $(printf '%q ' "$DEPLOY_DIR" "$PHP_BINARY")" <"$SCRIPT"
+        fi
 
     - name: Clear config and migrate
       shell: bash
       env:
         TARGET: ${{ steps.ssh.outputs.target }}
-        DEPLOY_DIR: ${{ inputs.deploy-dir }}
+        DEPLOY_DIR: ${{ steps.resolve.outputs.app-dir }}
         PHP_BINARY: ${{ steps.resolve.outputs.php }}
         RUN_MIGRATIONS: ${{ inputs.run-migrations }}
         MIGRATION_ORDER: ${{ inputs.migration-order }}
@@ -511,7 +831,7 @@ runs:
       shell: bash
       env:
         TARGET: ${{ steps.ssh.outputs.target }}
-        DEPLOY_DIR: ${{ inputs.deploy-dir }}
+        DEPLOY_DIR: ${{ steps.resolve.outputs.app-dir }}
         PHP_BINARY: ${{ steps.resolve.outputs.php }}
         ARTISAN_MEMORY_LIMIT: ${{ inputs.artisan-memory-limit }}
       run: |
@@ -523,7 +843,7 @@ runs:
       shell: bash
       env:
         TARGET: ${{ steps.ssh.outputs.target }}
-        DEPLOY_DIR: ${{ inputs.deploy-dir }}
+        DEPLOY_DIR: ${{ steps.resolve.outputs.app-dir }}
         PHP_BINARY: ${{ steps.resolve.outputs.php }}
         EXTRA_COMMANDS: ${{ inputs.artisan-commands }}
         ARTISAN_MEMORY_LIMIT: ${{ inputs.artisan-memory-limit }}
@@ -538,7 +858,7 @@ runs:
           <"$GITHUB_ACTION_PATH/scripts/remote-artisan.sh"
 
     - name: Install this application's cron lines
-      if: inputs.install-cron == 'true'
+      if: inputs.deployment-mode == 'in-place' && inputs.install-cron == 'true'
       shell: bash
       env:
         TARGET: ${{ steps.ssh.outputs.target }}
@@ -564,13 +884,116 @@ runs:
       shell: bash
       env:
         TARGET: ${{ steps.ssh.outputs.target }}
-        DEPLOY_DIR: ${{ inputs.deploy-dir }}
+        DEPLOY_DIR: ${{ steps.resolve.outputs.app-dir }}
         PHP_BINARY: ${{ steps.resolve.outputs.php }}
+        DEPLOYMENT_MODE: ${{ inputs.deployment-mode }}
+        STABLE_DIR: ${{ inputs.deploy-dir }}
         SCRIPT: ${{ inputs.post-deploy-script }}
       run: |
         set -euo pipefail
         [ -f "$SCRIPT" ] || { echo "::error::post-deploy-script '$SCRIPT' does not exist in the checkout." >&2; exit 2; }
-        ssh "$TARGET" "bash -s -- $(printf '%q ' "$DEPLOY_DIR" "$PHP_BINARY")" <"$SCRIPT"
+        if [ "$DEPLOYMENT_MODE" = atomic ]; then
+          ssh "$TARGET" "bash -s -- $(printf '%q ' "$DEPLOY_DIR" "$PHP_BINARY" "$STABLE_DIR")" <"$SCRIPT"
+        else
+          ssh "$TARGET" "bash -s -- $(printf '%q ' "$DEPLOY_DIR" "$PHP_BINARY")" <"$SCRIPT"
+        fi
+
+    - name: Run atomic pre-activation checks
+      if: inputs.deployment-mode == 'atomic' && inputs.pre-activate-script != ''
+      shell: bash
+      env:
+        TARGET: ${{ steps.ssh.outputs.target }}
+        CANDIDATE_DIR: ${{ steps.resolve.outputs.app-dir }}
+        PHP_BINARY: ${{ steps.resolve.outputs.php }}
+        SCRIPT: ${{ inputs.pre-activate-script }}
+      run: |
+        set -euo pipefail
+        [ -f "$SCRIPT" ] || { echo "::error::pre-activate-script '$SCRIPT' does not exist in the checkout." >&2; exit 2; }
+        ssh "$TARGET" "bash -s -- $(printf '%q ' "$CANDIDATE_DIR" "$PHP_BINARY" '${{ inputs.deploy-dir }}')" <"$SCRIPT"
+
+    - name: Atomically select the candidate
+      if: inputs.deployment-mode == 'atomic'
+      shell: bash
+      env:
+        TARGET: ${{ steps.ssh.outputs.target }}
+        DEPLOY_DIR: ${{ inputs.deploy-dir }}
+        RELEASE_ID: ${{ steps.resolve.outputs.release-id }}
+      run: |
+        set -euo pipefail
+        ssh "$TARGET" "bash -s -- $(printf '%q ' activate "$DEPLOY_DIR" "$RELEASE_ID")" \
+          <"$GITHUB_ACTION_PATH/scripts/atomic-release.sh"
+
+    - name: Ensure the atomic deployment's stable webroot symlink
+      if: inputs.deployment-mode == 'atomic' && inputs.webroot-symlink != ''
+      shell: bash
+      env:
+        TARGET: ${{ steps.ssh.outputs.target }}
+        DEPLOY_DIR: ${{ inputs.deploy-dir }}
+        LINK_NAME: ${{ inputs.webroot-symlink }}
+      run: |
+        set -euo pipefail
+        ssh "$TARGET" "bash -s -- $(printf '%q ' "$DEPLOY_DIR" "$LINK_NAME")" \
+          <"$GITHUB_ACTION_PATH/scripts/ensure-webroot-symlink.sh"
+
+    - name: Install the atomic deployment's cron lines
+      if: inputs.deployment-mode == 'atomic' && inputs.install-cron == 'true'
+      shell: bash
+      env:
+        TARGET: ${{ steps.ssh.outputs.target }}
+        DEPLOY_DIR: ${{ inputs.deploy-dir }}
+        PHP_BINARY: ${{ steps.resolve.outputs.php }}
+        CRON_MEMORY: ${{ inputs.cron-memory-limit }}
+        SCHEDULER_LOG: ${{ inputs.scheduler-log }}
+        CRON_LINES: ${{ inputs.cron-lines }}
+        EXTRA_CRON_LINES: ${{ inputs.extra-cron-lines }}
+      run: |
+        set -euo pipefail
+        cron_file=$(mktemp)
+        trap 'rm -f "$cron_file"' EXIT
+        bash "$GITHUB_ACTION_PATH/scripts/prepare-cron-lines.sh" \
+          "$DEPLOY_DIR" "$PHP_BINARY" "$CRON_MEMORY" "$SCHEDULER_LOG" "$CRON_LINES" "$EXTRA_CRON_LINES" \
+          >"$cron_file"
+        mapfile -t lines <"$cron_file"
+        ssh "$TARGET" "bash -s -- $(printf '%q ' "$DEPLOY_DIR" "${lines[@]}")" \
+          <"$GITHUB_ACTION_PATH/scripts/install-cron.sh"
+
+    - name: Restore unmanaged atomic cron lines
+      if: inputs.deployment-mode == 'atomic' && inputs.install-cron == 'false' && inputs.post-activate-manages-cron == 'false'
+      shell: bash
+      env:
+        TARGET: ${{ steps.ssh.outputs.target }}
+        DEPLOY_DIR: ${{ inputs.deploy-dir }}
+        RELEASE_ID: ${{ steps.resolve.outputs.release-id }}
+      run: |
+        set -euo pipefail
+        ssh "$TARGET" "bash -s -- $(printf '%q ' restore-cron "$DEPLOY_DIR" "$RELEASE_ID")" \
+          <"$GITHUB_ACTION_PATH/scripts/atomic-release.sh"
+
+    - name: Run the atomic post-activation script
+      if: inputs.deployment-mode == 'atomic' && inputs.post-activate-script != ''
+      shell: bash
+      env:
+        TARGET: ${{ steps.ssh.outputs.target }}
+        DEPLOY_DIR: ${{ inputs.deploy-dir }}
+        PHP_BINARY: ${{ steps.resolve.outputs.php }}
+        SCRIPT: ${{ inputs.post-activate-script }}
+      run: |
+        set -euo pipefail
+        [ -f "$SCRIPT" ] || { echo "::error::post-activate-script '$SCRIPT' does not exist in the checkout." >&2; exit 2; }
+        ssh "$TARGET" "bash -s -- $(printf '%q ' "$DEPLOY_DIR" "$PHP_BINARY" '${{ steps.resolve.outputs.app-dir }}')" <"$SCRIPT"
+
+    - name: Bring the selected atomic release online
+      if: inputs.deployment-mode == 'atomic'
+      shell: bash
+      env:
+        TARGET: ${{ steps.ssh.outputs.target }}
+        DEPLOY_DIR: ${{ inputs.deploy-dir }}
+        RELEASE_ID: ${{ steps.resolve.outputs.release-id }}
+        PHP_BINARY: ${{ steps.resolve.outputs.php }}
+      run: |
+        set -euo pipefail
+        ssh "$TARGET" "bash -s -- $(printf '%q ' serve "$DEPLOY_DIR" "$RELEASE_ID" "$PHP_BINARY")" \
+          <"$GITHUB_ACTION_PATH/scripts/atomic-release.sh"
 
     - name: Verify site health
       if: inputs.health-path != ''
@@ -598,3 +1021,79 @@ runs:
         PHP_VERSION_WANTED: ${{ inputs.php-version }}
         MIN_MEMORY: ${{ inputs.web-memory-limit || '128M' }}
       run: bash "$GITHUB_ACTION_PATH/scripts/verify-web-php.sh" "$TARGET" "$DEPLOY_DIR" "$SITE_URL" "$PHP_VERSION_WANTED" "$MIN_MEMORY"
+
+    - id: atomic-live-status
+      name: Read the selected atomic release status
+      if: inputs.deployment-mode == 'atomic'
+      shell: bash
+      env:
+        TARGET: ${{ steps.ssh.outputs.target }}
+        DEPLOY_DIR: ${{ inputs.deploy-dir }}
+        RELEASE_ID: ${{ steps.resolve.outputs.release-id }}
+        PHP_BINARY: ${{ steps.resolve.outputs.php }}
+      run: |
+        set -euo pipefail
+        output=$(ssh "$TARGET" "bash -s -- $(printf '%q ' status "$DEPLOY_DIR" "$RELEASE_ID" "$PHP_BINARY")" \
+          <"$GITHUB_ACTION_PATH/scripts/atomic-release.sh")
+        printf '%s\n' "$output"
+        for key in live_release live_commit live_state; do
+          value=$(sed -n "s/^${key}=//p" <<<"$output" | tail -1)
+          [ -n "$value" ] || { echo "::error::Atomic status did not report $key." >&2; exit 1; }
+          echo "$key=$value" >>"$GITHUB_OUTPUT"
+        done
+
+    - name: Run application-specific live verification
+      if: inputs.verification-script != ''
+      shell: bash
+      env:
+        SCRIPT: ${{ inputs.verification-script }}
+        DEPLOY_SSH_TARGET: ${{ steps.ssh.outputs.target }}
+        DEPLOY_PHP_BINARY: ${{ steps.resolve.outputs.php }}
+        DEPLOY_DIR: ${{ inputs.deploy-dir }}
+        DEPLOY_STABLE_DIR: ${{ inputs.deploy-dir }}
+        DEPLOY_SITE_URL: ${{ inputs.site-url }}
+        DEPLOY_RELEASE_ID: ${{ steps.resolve.outputs.release-id }}
+        DEPLOY_CANDIDATE_DIR: ${{ steps.resolve.outputs.app-dir }}
+        DEPLOY_SOURCE_COMMIT: ${{ github.sha }}
+        DEPLOY_LIVE_RELEASE: ${{ steps.atomic-live-status.outputs.live_release }}
+        DEPLOY_LIVE_COMMIT: ${{ steps.atomic-live-status.outputs.live_commit }}
+        DEPLOY_LIVE_STATE: ${{ steps.atomic-live-status.outputs.live_state }}
+        DEPLOYMENT_MODE: ${{ inputs.deployment-mode }}
+      run: |
+        set -euo pipefail
+        [ -f "$SCRIPT" ] || { echo "::error::verification-script '$SCRIPT' does not exist in the checkout." >&2; exit 2; }
+        bash "$SCRIPT"
+
+    - name: Commit the verified atomic release
+      if: inputs.deployment-mode == 'atomic'
+      shell: bash
+      env:
+        TARGET: ${{ steps.ssh.outputs.target }}
+        DEPLOY_DIR: ${{ inputs.deploy-dir }}
+        RELEASE_ID: ${{ steps.resolve.outputs.release-id }}
+      run: |
+        set -euo pipefail
+        ssh "$TARGET" "bash -s -- $(printf '%q ' commit "$DEPLOY_DIR" "$RELEASE_ID")" \
+          <"$GITHUB_ACTION_PATH/scripts/atomic-release.sh"
+
+    - id: atomic-finalize
+      name: Recover, unlock and report the atomic deployment
+      if: always() && inputs.deployment-mode == 'atomic' && steps.ssh.outcome == 'success'
+      shell: bash
+      env:
+        TARGET: ${{ steps.ssh.outputs.target }}
+        DEPLOY_DIR: ${{ inputs.deploy-dir }}
+        RELEASE_ID: ${{ steps.resolve.outputs.release-id }}
+        PHP_BINARY: ${{ steps.resolve.outputs.php }}
+      run: |
+        set -uo pipefail
+        status=0
+        output=$(ssh "$TARGET" "bash -s -- $(printf '%q ' finalize "$DEPLOY_DIR" "$RELEASE_ID" "$PHP_BINARY")" \
+          <"$GITHUB_ACTION_PATH/scripts/atomic-release.sh") || status=$?
+        printf '%s\n' "$output"
+        for key in live_release live_commit live_state; do
+          value=$(sed -n "s/^${key}=//p" <<<"$output" | tail -1)
+          [ -n "$value" ] || { echo "::error::Atomic finalizer did not report $key." >&2; exit 1; }
+          echo "$key=$value" >>"$GITHUB_OUTPUT"
+        done
+        exit "$status"

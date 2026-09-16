@@ -49,5 +49,12 @@ run example-laravel /tmp/branding logo-light.svg; absolute_source=$?
 run example-laravel .config/example/branding ../logo-light.svg; unsafe_file=$?
 check "sources outside .config and unsafe file names are refused" '[ "$absolute_source" -eq 2 ] && [ "$unsafe_file" -eq 2 ]'
 
+setup
+managed="$HOME/.deployments/example-laravel/releases/release-1"
+mkdir -p "$managed/public"
+run .deployments/example-laravel/releases/release-1 .config/example/branding logo-light.svg; status=$?
+check "branding installs into a managed atomic candidate" \
+    '[ "$status" -eq 0 ] && [ "$(cat "$managed/public/branding/logo-light.svg")" = light ]'
+
 echo "failures: $fails"
 exit "$fails"

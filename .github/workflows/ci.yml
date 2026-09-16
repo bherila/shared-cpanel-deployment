@@ -25,6 +25,15 @@ jobs:
       - name: prepare-cron-lines.sh harness
         run: bash scripts/test-prepare-cron-lines.sh
 
+      - name: atomic-release.sh harness
+        run: bash scripts/test-atomic-release.sh
+
+      - name: rsync-atomic-release.sh harness
+        run: bash scripts/test-rsync-atomic-release.sh
+
+      - name: composite action phase contract
+        run: bash scripts/test-action-contract.sh
+
       - name: rsync-deploy.sh harness
         run: bash scripts/test-rsync-deploy.sh
 
