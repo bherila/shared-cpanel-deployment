@@ -49,6 +49,13 @@ inputs:
       the legacy escape hatch and retains the v1 upload-then-migrate failure boundary.
     required: false
     default: atomic
+  atomic-layout:
+    description: >-
+      stable-directory keeps the cPanel application path a real directory and retains prior code in
+      the release tree. release-symlink preserves the v2.0 layout for hosts known to allow a symlinked
+      application-directory ancestor.
+    required: false
+    default: stable-directory
   persistent-paths:
     description: >-
       Newline-separated runtime directories shared by every atomic release. storage is the default;
@@ -307,6 +314,7 @@ runs:
         PHP_VERSION_INPUT: ${{ inputs.php-version }}
         PHP_BINARY_INPUT: ${{ inputs.php-binary }}
         DEPLOYMENT_MODE: ${{ inputs.deployment-mode }}
+        ATOMIC_LAYOUT: ${{ inputs.atomic-layout }}
         MIGRATION_ORDER: ${{ inputs.migration-order }}
         RUN_MIGRATIONS: ${{ inputs.run-migrations }}
         ARTISAN_MEMORY_LIMIT: ${{ inputs.artisan-memory-limit }}
@@ -342,6 +350,10 @@ runs:
         case $DEPLOYMENT_MODE in
           atomic | in-place) ;;
           *) echo "::error::deployment-mode must be 'atomic' or 'in-place', not '$DEPLOYMENT_MODE'." >&2; exit 2 ;;
+        esac
+        case $ATOMIC_LAYOUT in
+          stable-directory | release-symlink) ;;
+          *) echo "::error::atomic-layout must be 'stable-directory' or 'release-symlink', not '$ATOMIC_LAYOUT'." >&2; exit 2 ;;
         esac
         case $PHP_VERSION_INPUT in
           [0-9].[0-9] | [0-9].[0-9][0-9]) ;;
@@ -564,6 +576,7 @@ runs:
         RETAIN_RELEASES: ${{ inputs.retain-releases }}
         FAILURE_POLICY: ${{ inputs.failure-policy }}
         INITIAL_LIVE_COMMIT: ${{ inputs.initial-live-commit }}
+        ATOMIC_LAYOUT: ${{ inputs.atomic-layout }}
         PERSISTENT_PATHS: ${{ inputs.persistent-paths }}
       run: |
         set -euo pipefail
@@ -574,7 +587,7 @@ runs:
           [ -n "$path" ] && paths+=("$path")
         done <<<"$PERSISTENT_PATHS"
         [ "${#paths[@]}" -gt 0 ] || { echo "::error::persistent-paths must name at least one path." >&2; exit 2; }
-        ssh "$TARGET" "bash -s -- $(printf '%q ' begin "$DEPLOY_DIR" "$RELEASE_ID" "$SOURCE_COMMIT" "$LOCK_TIMEOUT" "$RETAIN_RELEASES" "$FAILURE_POLICY" "$INITIAL_LIVE_COMMIT" "${paths[@]}")" \
+        ssh "$TARGET" "bash -s -- $(printf '%q ' begin "$DEPLOY_DIR" "$RELEASE_ID" "$SOURCE_COMMIT" "$LOCK_TIMEOUT" "$RETAIN_RELEASES" "$FAILURE_POLICY" "$INITIAL_LIVE_COMMIT" "$ATOMIC_LAYOUT" "${paths[@]}")" \
           <"$GITHUB_ACTION_PATH/scripts/atomic-release.sh"
 
     - name: Verify remote capacity before atomic upload
@@ -968,12 +981,13 @@ runs:
       env:
         TARGET: ${{ steps.ssh.outputs.target }}
         DEPLOY_DIR: ${{ inputs.deploy-dir }}
+        ACTIVE_CANDIDATE_DIR: ${{ inputs.atomic-layout == 'stable-directory' && inputs.deploy-dir || steps.resolve.outputs.app-dir }}
         PHP_BINARY: ${{ steps.resolve.outputs.php }}
         SCRIPT: ${{ inputs.post-activate-script }}
       run: |
         set -euo pipefail
         [ -f "$SCRIPT" ] || { echo "::error::post-activate-script '$SCRIPT' does not exist in the checkout." >&2; exit 2; }
-        ssh "$TARGET" "bash -s -- $(printf '%q ' "$DEPLOY_DIR" "$PHP_BINARY" '${{ steps.resolve.outputs.app-dir }}')" <"$SCRIPT"
+        ssh "$TARGET" "bash -s -- $(printf '%q ' "$DEPLOY_DIR" "$PHP_BINARY" "$ACTIVE_CANDIDATE_DIR")" <"$SCRIPT"
 
     - name: Bring the selected atomic release online
       if: inputs.deployment-mode == 'atomic'
@@ -1090,7 +1104,7 @@ runs:
         DEPLOY_STABLE_DIR: ${{ inputs.deploy-dir }}
         DEPLOY_SITE_URL: ${{ inputs.site-url }}
         DEPLOY_RELEASE_ID: ${{ steps.resolve.outputs.release-id }}
-        DEPLOY_CANDIDATE_DIR: ${{ steps.resolve.outputs.app-dir }}
+        DEPLOY_CANDIDATE_DIR: ${{ inputs.deployment-mode == 'atomic' && inputs.atomic-layout == 'stable-directory' && inputs.deploy-dir || steps.resolve.outputs.app-dir }}
         DEPLOY_SOURCE_COMMIT: ${{ github.sha }}
         DEPLOY_LIVE_RELEASE: ${{ steps.atomic-live-status.outputs.live_release }}
         DEPLOY_LIVE_COMMIT: ${{ steps.atomic-live-status.outputs.live_commit }}
