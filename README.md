@@ -395,6 +395,8 @@ matches the fixed aggregate protocol. No descendant can keep an SSH pipe open th
 Generated config is decoded using a bounded scalar-array grammar before bootstrap; executable cache
 content is rejected without execution. Laravel loads a private regenerated snapshot of those decoded
 bytes, not the original cache file, preventing a validation/re-require race. No live cache is changed.
+If the original cache is absent, the private path stays absent and source configuration is loaded;
+a late-created original cache is never loaded during this audit.
 
 For personal-site, SVC, PHR, Games and UC adoption, enable this input explicitly and retain each
 application's scheduler/worker, identity and OAuth/MCP assertions. Record aggregate outputs plus

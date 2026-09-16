@@ -107,18 +107,20 @@ try {
         return $result;
     };
     $cache = $app->getCachedConfigPath();
+    $snapshot = __DIR__.'/config.php';
     if (file_exists($cache) || is_link($cache)) {
         if (is_link($cache) || !is_file($cache)) { throw new RuntimeException('cache file'); }
         $source = file_get_contents($cache, false, null, 0, 4 * 1024 * 1024 + 1);
         if (!is_string($source) || strlen($source) > 4 * 1024 * 1024) { throw new RuntimeException('cache bound'); }
         $config = $decode($source);
-        $snapshot = __DIR__.'/config.php';
         if (file_put_contents($snapshot, '<?php return '.var_export($config, true).';') === false) {
             throw new RuntimeException('snapshot');
         }
-        putenv('APP_CONFIG_CACHE='.$snapshot);
-        $_ENV['APP_CONFIG_CACHE'] = $_SERVER['APP_CONFIG_CACHE'] = $snapshot;
     }
+    // Freeze absence too: a cache appearing at the original path after inspection
+    // must never become executable input to Laravel's configuration bootstrap.
+    putenv('APP_CONFIG_CACHE='.$snapshot);
+    $_ENV['APP_CONFIG_CACHE'] = $_SERVER['APP_CONFIG_CACHE'] = $snapshot;
     $app->make(Illuminate\Contracts\Console\Kernel::class)->bootstrap();
     $migrator = $app->make('migrator');
     $paths = array_merge($migrator->paths(), [$app->databasePath('migrations')]);

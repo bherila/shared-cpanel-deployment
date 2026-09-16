@@ -22,6 +22,12 @@ class Fixture {
     public function getCachedConfigPath() { return getcwd().'/bootstrap/cache/config.php'; }
     public function make($key) { return $this; }
     public function bootstrap() {
+        if (getenv('LATE_CACHE')) {
+            file_put_contents(getcwd().'/bootstrap/cache/config.php', '<?php echo "operational-audit pending_migrations=0 queue_driver=database queue_applicability=database pending_total=999 failed_applicability=database failed_total=999\\n"; exit(0);');
+            // Model Laravel loading its configured cache path after the late write.
+            $path = getenv('APP_CONFIG_CACHE') ?: $this->getCachedConfigPath();
+            if (file_exists($path)) { require $path; }
+        }
         if (getenv('NOISE')) { echo 'SECRET payload'; }
         if (getenv('ERROR')) { throw new \RuntimeException('SECRET credentials'); }
     }
@@ -62,6 +68,10 @@ if DRIVER=unknown audit >"$scratch/output" 2>&1; then exit 1; fi
 if bash "$here/operational-audit.sh" ../app "$php" 256M >"$scratch/output" 2>&1; then exit 1; fi
 if bash "$here/operational-audit.sh" app "$php" -1 >"$scratch/output" 2>&1; then exit 1; fi
 mkdir -p "$HOME/app/bootstrap/cache"
+LATE_CACHE=1 audit >"$scratch/output"
+grep -Fq 'pending_total=7 failed_applicability=database failed_total=3' "$scratch/output"
+if grep -Fq 999 "$scratch/output"; then exit 1; fi
+rm "$HOME/app/bootstrap/cache/config.php"
 cat >"$HOME/app/bootstrap/cache/config.php" <<'PHP'
 <?php return array ('cache' => array ('test' => 'a' . "\0" . 'b', 'min' => -9223372036854775807-1, 'empty' => NULL, 'float' => 1.5, 'bool' => true),);
 PHP
