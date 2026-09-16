@@ -104,6 +104,7 @@ implicit behavior change.
 | `branding-files` | four standard files | Plain names required in the source and copied atomically. |
 | **Artisan** | | |
 | `run-migrations` | `true` | `migrate --force`, followed by an assertion that none remain pending. |
+| `operational-audit` | `false` | Atomic only: independent pending-migration assertion and read-only configured queue/failed-job aggregate reporting before selection and again before serving. |
 | `migration-order` | `after-upload` | In-place compatibility only. Atomic mode always migrates the candidate and rejects `before-upload`. |
 | `artisan-commands` | — | Extra invocations after `config:cache`, e.g. `view:clear`. |
 | `quiesce-script` | — | After cron pause/old-code maintenance and before conversion or DB risk; wait for running workers here. Gets `<candidate-path> <php> <stable-path>`. |
@@ -360,6 +361,65 @@ The old checklist remains relevant for the explicit in-place escape hatch:
   tagged line; `~/.crontab-backups/` has the previous crontab.
 - If an existing deploy ran `migrate` without `--force`, check `APP_ENV` first.
 
+## Optional operational audit and next release adoption
+
+Enable `operational-audit: 'true'` on atomic deployments after pinning the next reviewed shared-action
+release (do not move existing SHA pins implicitly). The default stays disabled for compatibility.
+The action first audits an existing selected app under the owned deployment lock before quiescence,
+persistent conversion or database risk (fresh installs skip this gate). Missing applicable tables or
+existing migration drift therefore abort before taking a healthy old release down. It then audits
+after migrations and candidate hooks, before selection,
+and again from the selected final path after cache refresh and stable hooks, before `artisan up`.
+It discovers pending migrations independently of `run-migrations`; even a no-migration deployment
+must have no discovered pending migration. Framework migration discovery/repository connections are
+honored; no migration is run by this audit.
+
+Queue reporting honors the selected `queue.default` connection/driver, its configured database
+connection/table, and the independent failed-job driver/database/table. Only aggregate database
+`COUNT(*)` queries and migration metadata reads are issued: no payloads, queue names, connection names,
+table names, credentials, or exception messages are emitted. Nonempty queues and failed-job history
+are observations, **not a reason to fail deployment**. Missing applicable tables/configuration and SQL
+errors fail closed. Applications must separately define any backlog/error policy.
+
+`sync`/`null` report `no-persistent-queue` with `not-counted`, never a misleading zero. External queue
+drivers report `external`/`not-counted`; this is **not a health assertion or a completed count audit**.
+Consumers using external queues/failed-job stores need an explicit application-specific read-only
+count/health verifier. Database failed jobs are counted even when the active queue is synchronous.
+Unrecognized custom drivers fail closed rather than guessing applicability.
+
+The host must provide an absolute coreutils `timeout` binary. PHP is bounded to 30 seconds with a
+two-second TERM/KILL grace, finite configured memory (empty uses 256M; `-1` is refused), file-backed
+input/output with an 8192-block file-size limit, and a single validated output line of at most 512 bytes.
+Framework bootstrap is trusted application code; any captured stdout/stderr is withheld unless it
+matches the fixed aggregate protocol. No descendant can keep an SSH pipe open through audit I/O.
+Generated config is decoded using a bounded scalar-array grammar before bootstrap; executable cache
+content is rejected without execution. Laravel loads a private regenerated snapshot of those decoded
+bytes, not the original cache file, preventing a validation/re-require race. No live cache is changed.
+If the original cache is absent, the private path stays absent and source configuration is loaded;
+a late-created original cache is never loaded during this audit.
+Services, packages, routes and events cache paths are also frozen to private scratch paths before
+application creation. Package/provider manifests are regenerated there from trusted candidate source
+and Composer metadata; writable original bootstrap caches are never executed or changed.
+Real-time facades preserve alias/container behavior but are regenerated from the trusted framework
+stub in private scratch files after strict PHP namespace validation; original shared storage facade
+cache PHP is never loaded. Existing registered alias callbacks are replaced without changing storage
+or other runtime paths.
+An unapplied stored schema dump also fails the migration assertion when the migration repository is
+missing or empty, even if schema pruning removed every historical PHP migration. Detection mirrors
+Laravel's default connection and `.dump`-before-`.sql` schema path selection without importing schema.
+
+For personal-site, SVC, PHR, Games and UC adoption, enable this input explicitly and retain each
+application's scheduler/worker, identity and OAuth/MCP assertions. Record aggregate outputs plus
+the exact live commit/state on the normal deployment. Establish queue applicability rather than
+inferring it from absence of a managed worker. UC remains paused until its owner authorizes rollout.
+
+The real Laravel 12/13 integration deliberately creates a SQLite table then throws from a
+nontransactional migration, **only inside an isolated temporary application/database**. It exercises
+stable-directory finalization and proves exact prior metadata/real directory/storage containment,
+maintenance, paused/recoverable cron, and preservation of the partially applied schema. This proves
+code-selection safety, not availability or database rollback. Never deliberately fail a production
+migration; incompatible schema risk correctly leaves the old selected code down.
+
 ## Development
 
 ```sh
@@ -375,6 +435,7 @@ bash scripts/test-htaccess.sh
 bash scripts/test-configure-env.sh
 bash scripts/test-assert-no-pending-migrations.sh
 bash scripts/test-remote-artisan.sh
+bash scripts/test-operational-audit.sh
 bash scripts/test-ensure-passport-keys.sh
 bash scripts/test-install-branding.sh
 ```

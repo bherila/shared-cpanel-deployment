@@ -192,6 +192,10 @@ inputs:
     description: Run `artisan migrate --force` after config:clear, then fail if any migration remains pending.
     required: false
     default: 'true'
+  operational-audit:
+    description: Optional atomic read-only bounded migration and aggregate queue audit before selection and serving. Reports counts, not payloads; does not require an empty backlog.
+    required: false
+    default: 'false'
   migration-order:
     description: >-
       Run migrations after the application upload (default), or upload database/migrations and migrate
@@ -319,6 +323,7 @@ runs:
         ATOMIC_LAYOUT: ${{ inputs.atomic-layout }}
         MIGRATION_ORDER: ${{ inputs.migration-order }}
         RUN_MIGRATIONS: ${{ inputs.run-migrations }}
+        OPERATIONAL_AUDIT: ${{ inputs.operational-audit }}
         ARTISAN_MEMORY_LIMIT: ${{ inputs.artisan-memory-limit }}
         RETAIN_RELEASES: ${{ inputs.retain-releases }}
         LOCK_TIMEOUT: ${{ inputs.deploy-lock-timeout }}
@@ -334,6 +339,7 @@ runs:
           keep-runtime-storage=${{ inputs.keep-runtime-storage }}
           set-php-handler=${{ inputs.set-php-handler }}
           run-migrations=${{ inputs.run-migrations }}
+          operational-audit=${{ inputs.operational-audit }}
           install-cron=${{ inputs.install-cron }}
           allow-unverified-quiescence=${{ inputs.allow-unverified-quiescence }}
           verify-web-php=${{ inputs.verify-web-php }}
@@ -345,6 +351,9 @@ runs:
             *) echo "::error::${flag%%=*} must be 'true' or 'false', not '${flag#*=}'." >&2; exit 2 ;;
           esac
         done
+        if [ "$OPERATIONAL_AUDIT" = true ] && [ "$DEPLOYMENT_MODE" != atomic ]; then
+          echo '::error::operational-audit is only supported in atomic mode.' >&2; exit 2
+        fi
         case $DEPLOY_DIR_INPUT in
           '' | . | .. | .* | *[!A-Za-z0-9._-]*)
             echo "::error::deploy-dir must be a plain, non-hidden account-home name." >&2; exit 2 ;;
@@ -649,6 +658,18 @@ runs:
           exit 2
         fi
 
+    - name: Audit existing operational state before quiescence
+      if: inputs.deployment-mode == 'atomic' && inputs.operational-audit == 'true' && steps.atomic-preflight.outputs.existing_release == 'true'
+      shell: bash
+      env:
+        TARGET: ${{ steps.ssh.outputs.target }}
+        APP_DIR: ${{ inputs.deploy-dir }}
+        PHP_BINARY: ${{ steps.resolve.outputs.php }}
+        MEMORY_LIMIT: ${{ inputs.artisan-memory-limit }}
+      run: |
+        set -euo pipefail
+        timeout --kill-after=5s 60s ssh -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=2 "$TARGET" "bash -s -- $(printf '%q ' "$APP_DIR" "$PHP_BINARY" "$MEMORY_LIMIT")" <"$GITHUB_ACTION_PATH/scripts/operational-audit.sh"
+
     - name: Quiesce the selected atomic deployment
       if: inputs.deployment-mode == 'atomic' && steps.atomic-preflight.outputs.conversion_required == 'true'
       shell: bash
@@ -952,6 +973,18 @@ runs:
         [ -f "$SCRIPT" ] || { echo "::error::pre-activate-script '$SCRIPT' does not exist in the checkout." >&2; exit 2; }
         ssh "$TARGET" "bash -s -- $(printf '%q ' "$CANDIDATE_DIR" "$PHP_BINARY" '${{ inputs.deploy-dir }}')" <"$SCRIPT"
 
+    - name: Audit candidate operational state
+      if: inputs.deployment-mode == 'atomic' && inputs.operational-audit == 'true'
+      shell: bash
+      env:
+        TARGET: ${{ steps.ssh.outputs.target }}
+        APP_DIR: ${{ steps.resolve.outputs.app-dir }}
+        PHP_BINARY: ${{ steps.resolve.outputs.php }}
+        MEMORY_LIMIT: ${{ inputs.artisan-memory-limit }}
+      run: |
+        set -euo pipefail
+        timeout --kill-after=5s 60s ssh -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=2 "$TARGET" "bash -s -- $(printf '%q ' "$APP_DIR" "$PHP_BINARY" "$MEMORY_LIMIT")" <"$GITHUB_ACTION_PATH/scripts/operational-audit.sh"
+
     - name: Atomically select the candidate
       if: inputs.deployment-mode == 'atomic'
       shell: bash
@@ -1011,6 +1044,18 @@ runs:
         set -euo pipefail
         [ -f "$SCRIPT" ] || { echo "::error::post-activate-script '$SCRIPT' does not exist in the checkout." >&2; exit 2; }
         ssh "$TARGET" "bash -s -- $(printf '%q ' "$DEPLOY_DIR" "$PHP_BINARY" "$ACTIVE_CANDIDATE_DIR")" <"$SCRIPT"
+
+    - name: Audit selected operational state before serving
+      if: inputs.deployment-mode == 'atomic' && inputs.operational-audit == 'true'
+      shell: bash
+      env:
+        TARGET: ${{ steps.ssh.outputs.target }}
+        APP_DIR: ${{ inputs.atomic-layout == 'stable-directory' && inputs.deploy-dir || steps.resolve.outputs.app-dir }}
+        PHP_BINARY: ${{ steps.resolve.outputs.php }}
+        MEMORY_LIMIT: ${{ inputs.artisan-memory-limit }}
+      run: |
+        set -euo pipefail
+        timeout --kill-after=5s 60s ssh -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=2 "$TARGET" "bash -s -- $(printf '%q ' "$APP_DIR" "$PHP_BINARY" "$MEMORY_LIMIT")" <"$GITHUB_ACTION_PATH/scripts/operational-audit.sh"
 
     - name: Bring the selected atomic release online
       if: inputs.deployment-mode == 'atomic'
