@@ -5,6 +5,12 @@
 #
 # Runs ON THE RUNNER. Environment: SSH_ALIAS, SSH_HOST_NAME, SSH_USER_NAME, SSH_PRIVATE_KEY,
 # SSH_KNOWN_HOSTS. Writes `target=<alias>` to $GITHUB_OUTPUT when that is set.
+#
+# A deployment makes dozens of ssh/rsync calls. Opening a fresh TCP connection and key exchange for
+# each one trips per-source connection-rate limits on shared hosts, which reset the handshake
+# (`kex_exchange_identification: read: Connection reset by peer`) at an arbitrary step, possibly
+# after the application is already in maintenance. The alias therefore multiplexes every call over
+# one authenticated master connection that persists for the rest of the job.
 set -euo pipefail
 
 for pair in "alias:${SSH_ALIAS:-}" "host:${SSH_HOST_NAME:-}" "username:${SSH_USER_NAME:-}"; do
@@ -26,6 +32,9 @@ key="$HOME/.ssh/$SSH_ALIAS.key"
 known="$HOME/.ssh/$SSH_ALIAS.known_hosts"
 (umask 077 && printf '%s\n' "$SSH_PRIVATE_KEY" >"$key")
 (umask 077 && printf '%s\n' "$SSH_KNOWN_HOSTS" >"$known")
+# %C hashes the connection tuple, keeping the socket path short enough for sun_path.
+control_dir="$HOME/.ssh/cm"
+install -d -m 700 "$control_dir"
 
 if [ -f "$HOME/.ssh/config" ] && grep -Eq "^Host[[:space:]]+$SSH_ALIAS([[:space:]]|$)" "$HOME/.ssh/config"; then
     echo "::error::~/.ssh/config already defines Host $SSH_ALIAS; choose another ssh-alias." >&2
@@ -41,6 +50,11 @@ fi
     printf '    UserKnownHostsFile %s\n' "$known"
     printf '    StrictHostKeyChecking yes\n'
     printf '    BatchMode yes\n'
+    printf '    ControlMaster auto\n'
+    printf '    ControlPath %s\n' "$control_dir/%C"
+    printf '    ControlPersist 15m\n'
+    printf '    ServerAliveInterval 15\n'
+    printf '    ServerAliveCountMax 4\n'
 } >>"$HOME/.ssh/config"
 chmod 600 "$HOME/.ssh/config"
 
