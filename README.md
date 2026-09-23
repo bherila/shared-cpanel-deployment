@@ -71,7 +71,7 @@ implicit behavior change.
 |---|---|---|
 | **Connection** | | |
 | `ssh-host`, `ssh-username`, `ssh-private-key`, `ssh-known-hosts` | required | Host keys are never trusted on first use. |
-| `ssh-alias` | `cpanel-deploy` | Returned as the `ssh-target` output for your own steps. |
+| `ssh-alias` | `cpanel-deploy` | Returned as the `ssh-target` output for your own steps. Every call through the alias shares one multiplexed connection (`ControlMaster auto`, `ControlPersist 15m`), so a deploy authenticates once instead of tripping a host's per-source connection-rate limit partway through. |
 | **Application** | | |
 | `deploy-dir` | required | Plain directory name under the account home. Never a webroot. |
 | `site-url` | required | https URL for the health and PHP checks. |

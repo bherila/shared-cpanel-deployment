@@ -78,6 +78,22 @@ jobs:
       - name: install-branding.sh harness
         run: bash scripts/test-install-branding.sh
 
+      - name: Install OpenSSH server
+        run: |
+          if [ ! -x /usr/sbin/sshd ]; then
+            for attempt in 1 2 3; do
+              if sudo apt-get update -q \
+                && sudo apt-get install -y -q --no-install-recommends openssh-server; then
+                break
+              fi
+              [ "$attempt" = 3 ] && exit 1
+              sleep $((attempt * 10))
+            done
+          fi
+
+      - name: configure-ssh.sh real-transport harness
+        run: bash scripts/test-configure-ssh.sh
+
       - name: action.yml references only scripts that exist
         run: |
           set -euo pipefail
