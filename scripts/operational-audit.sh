@@ -372,8 +372,10 @@ try {
         $failedState = 'external';
     } else { throw new RuntimeException('unsupported failed queue'); }
     if ($runtime) {
-        $databaseName = config('database.default');
-        $database = is_string($databaseName) ? config('database.connections.'.$databaseName) : null;
+        // Reuse the connection already selected by the migration audit. Laravel resolves
+        // DB_URL and driver aliases before constructing it; raw cached fields may describe
+        // a persistent file while the effective connection actually uses :memory:.
+        $database = $migrator->resolveConnection(null)->getConfig();
         if (!is_array($database)) { $fail('database.default', 'managed', 'database', 'type'); }
         $dbDriver = $database['driver'] ?? null;
         if (!in_array($dbDriver, ['sqlite', 'mysql', 'mariadb', 'pgsql', 'sqlsrv'], true)) { $fail('database.driver', 'managed', 'database', 'type'); }
@@ -408,7 +410,7 @@ if ! (ulimit -f 8192; exec "$timeout_binary" --signal=TERM --kill-after=2s 30s "
     if [ "$phase" = finalized ] && [ "$(generation_state || true)" = superseded ]; then
         echo 'runtime-audit generation=superseded'; exit 0
     fi
-    if [ -n "$release" ] && [ "$(wc -c <"$scratch/output")" -le 512 ] && LC_ALL=C grep -Eq '^runtime-audit key=[a-z.]+ root=[a-z-]+ type=[a-z-]+ reason=[a-z-]+$' "$scratch/output"; then
+    if [ -n "$release" ] && [ "$(wc -c <"$scratch/output")" -le 512 ] && [ "$(wc -l <"$scratch/output")" -eq 1 ] && LC_ALL=C grep -Eq '^runtime-audit key=[a-z.]+ root=[a-z-]+ type=[a-z-]+ reason=[a-z-]+$' "$scratch/output"; then
         cat "$scratch/output" >&2
     fi
     echo '::error::Operational audit failed or exceeded its bound; diagnostics redacted.' >&2

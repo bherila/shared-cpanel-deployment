@@ -33,7 +33,12 @@ function config($key) {
 class Fixture {
     public function getCachedConfigPath() { return getcwd().'/bootstrap/cache/config.php'; }
     public function make($key) { return $this; }
-    public function bootstrap() {}
+    public function bootstrap() {
+        if (getenv('NOISY_BOOTSTRAP')) {
+            fwrite(STDOUT, "SECRET_DIRECT_STDOUT\n");
+            throw new \RuntimeException('SECRET_EXCEPTION');
+        }
+    }
     public function paths() { return []; }
     public function databasePath($path) { return '/nonexistent/'.$path; }
     public function getMigrationFiles($paths) { return []; }
@@ -41,6 +46,9 @@ class Fixture {
     public function repositoryExists() { return true; }
     public function getRan() { return []; }
     public function resolveConnection($name) { return $this; }
+    public function getConfig() {
+        return ['driver'=>'sqlite', 'database'=>getenv('EFFECTIVE_DB_PATH') ?: getenv('DB_PATH') ?: 'storage/app/database.sqlite'];
+    }
     public function getName() { return 'sqlite'; }
     public function isDownForMaintenance() { return (bool) getenv('DOWN'); }
 }
@@ -85,6 +93,13 @@ reject() {
 write_config
 audit
 audit finalized
+if NOISY_BOOTSTRAP=1 audit selected > "$scratch/noisy-output" 2>&1; then exit 1; fi
+if grep -Fq SECRET "$scratch/noisy-output"; then echo 'direct bootstrap stdout was disclosed' >&2; exit 1; fi
+grep -Fq 'diagnostics redacted' "$scratch/noisy-output"
+if EFFECTIVE_DB_PATH=:memory: audit selected > "$scratch/effective-db-output" 2>&1; then
+    echo 'nonpersistent effective database was accepted' >&2; exit 1
+fi
+grep -Fq 'key=database.' "$scratch/effective-db-output"
 DB_PATH="$stable/storage/app/database.sqlite" audit finalized > /dev/null
 env HOME="$task_home" bash "$here/operational-audit.sh" app "$php" -1 fixture "$commit" $'storage\npublic/ohif' selected > /dev/null
 for fixture in stale traversal absolute stream log-directory wrong-type; do write_config "$fixture"; reject selected "$fixture"; done
