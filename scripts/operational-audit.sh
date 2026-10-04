@@ -229,7 +229,19 @@ try {
         $directory($config['session']['files'] ?? null, 'session.files', true);
         $stores = $config['cache']['stores'] ?? null;
         if (!is_array($stores) || count($stores) > 64) { $fail('cache.stores', 'managed', 'directory', 'type'); }
-        foreach ($stores as $store) {
+        $activeStores = [];
+        $activate = static function ($name, int $depth = 0) use (&$activate, &$activeStores, $stores, $fail): void {
+            if (!is_string($name) || !isset($stores[$name]) || $depth > 16) { $fail('cache.default', 'managed', 'store', 'type'); }
+            if (isset($activeStores[$name])) { return; }
+            $activeStores[$name] = true;
+            if (($stores[$name]['driver'] ?? null) === 'failover') {
+                $children = $stores[$name]['stores'] ?? null;
+                if (!is_array($children) || count($children) > 64) { $fail('cache.failover', 'managed', 'store', 'type'); }
+                foreach ($children as $child) { $activate($child, $depth + 1); }
+            }
+        };
+        $activate($config['cache']['default'] ?? null);
+        foreach ($stores as $storeName => $store) {
             if (!is_array($store)) { $fail('cache.store', 'managed', 'directory', 'type'); }
             if (($store['driver'] ?? null) === 'file') {
                 $directory($store['path'] ?? null, 'cache.file.path', true);
@@ -243,7 +255,7 @@ try {
                 $diskName = $store['disk'] ?? $config['filesystems']['default'] ?? null;
                 $disk = is_string($diskName) ? ($config['filesystems']['disks'][$diskName] ?? null) : null;
                 if (!is_array($disk)) { $fail('cache.storage.disk', 'disk-relative', 'relative', 'type'); }
-                if (($disk['driver'] ?? null) === 'local') {
+                if (($disk['driver'] ?? null) === 'local' && isset($activeStores[$storeName])) {
                     $diskRoot = $directory($disk['root'] ?? null, 'cache.storage.root', true);
                     $directory($diskRoot.'/'.$relative, 'cache.storage.path', true);
                 }

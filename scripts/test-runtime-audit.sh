@@ -52,7 +52,7 @@ $stable = $argv[1];
 $config = [
  'view'=>['paths'=>[$stable.'/resources/views'],'compiled'=>$stable.'/storage/framework/views'],
  'session'=>['files'=>$stable.'/storage/framework/sessions'],
- 'cache'=>['stores'=>[
+ 'cache'=>['default'=>'storage','stores'=>[
    'file'=>['driver'=>'file','path'=>$stable.'/storage/framework/cache/data','lock_path'=>null],
    'storage'=>['driver'=>'storage','path'=>'data','disk'=>'local'],
  ]],

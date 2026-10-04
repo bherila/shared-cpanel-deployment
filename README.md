@@ -463,7 +463,7 @@ operational audit's existing parser; it is never executed. View source paths mus
 compiled views, file sessions, file-cache data/locks, and logging parents must be existing
 canonical directories with the required runtime write access. Nested aliases, vanished
 releases, path traversal, wrong kinds and symlink escapes fail with fixed key/root/type/reason
-labels. Storage cache paths are classified as disk-relative; local disks additionally
+labels. Storage cache paths are classified as disk-relative; active local storage cache disks additionally
 require a canonical existing root and data leaf. Explicit Monolog stdout/stderr/output
 streams and `/dev/null` are typed separately from file targets.
 
