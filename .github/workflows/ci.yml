@@ -78,6 +78,9 @@ jobs:
       - name: canonical runtime audit harness
         run: bash scripts/test-runtime-audit.sh
 
+      - name: read-only post-finalizer hook harness
+        run: bash scripts/test-run-post-finalize-hook.sh
+
       - name: ensure-passport-keys.sh harness
         run: bash scripts/test-ensure-passport-keys.sh
 
