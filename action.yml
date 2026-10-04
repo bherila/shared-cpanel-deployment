@@ -196,6 +196,14 @@ inputs:
     description: Optional atomic read-only bounded migration and aggregate queue audit before selection and serving. Reports counts, not payloads; does not require an empty backlog.
     required: false
     default: 'false'
+  runtime-audit:
+    description: Optional bounded canonical cached-path, persistence and database audit after final-path refresh and after finalization. Requires atomic stable-directory layout; does not provision missing paths.
+    required: false
+    default: 'false'
+  post-finalize-script:
+    description: Optional runner-side read-only diagnostic after successful atomic finalization. Receives the same DEPLOY_* environment as verification-script, using finalizer outputs.
+    required: false
+    default: ''
   migration-order:
     description: >-
       Run migrations after the application upload (default), or upload database/migrations and migrate
@@ -332,6 +340,8 @@ runs:
         MIGRATION_ORDER: ${{ inputs.migration-order }}
         RUN_MIGRATIONS: ${{ inputs.run-migrations }}
         OPERATIONAL_AUDIT: ${{ inputs.operational-audit }}
+        RUNTIME_AUDIT: ${{ inputs.runtime-audit }}
+        POST_FINALIZE_SCRIPT: ${{ inputs.post-finalize-script }}
         ARTISAN_MEMORY_LIMIT: ${{ inputs.artisan-memory-limit }}
         RETAIN_RELEASES: ${{ inputs.retain-releases }}
         LOCK_TIMEOUT: ${{ inputs.deploy-lock-timeout }}
@@ -348,6 +358,7 @@ runs:
           set-php-handler=${{ inputs.set-php-handler }}
           run-migrations=${{ inputs.run-migrations }}
           operational-audit=${{ inputs.operational-audit }}
+          runtime-audit=${{ inputs.runtime-audit }}
           install-cron=${{ inputs.install-cron }}
           allow-unverified-quiescence=${{ inputs.allow-unverified-quiescence }}
           verify-web-php=${{ inputs.verify-web-php }}
@@ -361,6 +372,12 @@ runs:
         done
         if [ "$OPERATIONAL_AUDIT" = true ] && [ "$DEPLOYMENT_MODE" != atomic ]; then
           echo '::error::operational-audit is only supported in atomic mode.' >&2; exit 2
+        fi
+        if [ "$RUNTIME_AUDIT" = true ] && { [ "$DEPLOYMENT_MODE" != atomic ] || [ "$ATOMIC_LAYOUT" != stable-directory ]; }; then
+          echo '::error::runtime-audit requires atomic stable-directory layout.' >&2; exit 2
+        fi
+        if [ -n "$POST_FINALIZE_SCRIPT" ] && [ "$DEPLOYMENT_MODE" != atomic ]; then
+          echo '::error::post-finalize-script requires atomic mode.' >&2; exit 2
         fi
         case $DEPLOY_DIR_INPUT in
           '' | . | .. | .* | *[!A-Za-z0-9._-]*)
@@ -1076,6 +1093,21 @@ runs:
         set -euo pipefail
         timeout --kill-after=5s 60s ssh -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=2 "$TARGET" "bash -s -- $(printf '%q ' "$APP_DIR" "$PHP_BINARY" "$MEMORY_LIMIT")" <"$GITHUB_ACTION_PATH/scripts/operational-audit.sh"
 
+    - name: Audit canonical selected runtime paths
+      if: inputs.deployment-mode == 'atomic' && inputs.runtime-audit == 'true'
+      shell: bash
+      env:
+        TARGET: ${{ steps.ssh.outputs.target }}
+        APP_DIR: ${{ inputs.deploy-dir }}
+        PHP_BINARY: ${{ steps.resolve.outputs.php }}
+        MEMORY_LIMIT: ${{ inputs.artisan-memory-limit }}
+        RELEASE_ID: ${{ steps.resolve.outputs.release-id }}
+        SOURCE_COMMIT: ${{ github.sha }}
+        PERSISTENT_PATHS: ${{ inputs.persistent-paths }}
+      run: |
+        set -euo pipefail
+        timeout --kill-after=5s 60s ssh -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=2 "$TARGET" "bash -s -- $(printf '%q ' "$APP_DIR" "$PHP_BINARY" "$MEMORY_LIMIT" "$RELEASE_ID" "$SOURCE_COMMIT" "$PERSISTENT_PATHS" selected)" <"$GITHUB_ACTION_PATH/scripts/operational-audit.sh"
+
     - name: Bring the selected atomic release online
       if: inputs.deployment-mode == 'atomic'
       shell: bash
@@ -1238,3 +1270,58 @@ runs:
           echo "$key=$value" >>"$GITHUB_OUTPUT"
         done
         exit "$status"
+
+    - name: Audit finalized runtime and transaction state
+      if: success() && inputs.deployment-mode == 'atomic' && inputs.runtime-audit == 'true' && steps.atomic-finalize.outcome == 'success'
+      shell: bash
+      env:
+        TARGET: ${{ steps.ssh.outputs.target }}
+        APP_DIR: ${{ inputs.deploy-dir }}
+        PHP_BINARY: ${{ steps.resolve.outputs.php }}
+        MEMORY_LIMIT: ${{ inputs.artisan-memory-limit }}
+        RELEASE_ID: ${{ steps.resolve.outputs.release-id }}
+        SOURCE_COMMIT: ${{ github.sha }}
+        PERSISTENT_PATHS: ${{ inputs.persistent-paths }}
+      run: |
+        set -euo pipefail
+        timeout --kill-after=5s 60s ssh -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=2 "$TARGET" "bash -s -- $(printf '%q ' "$APP_DIR" "$PHP_BINARY" "$MEMORY_LIMIT" "$RELEASE_ID" "$SOURCE_COMMIT" "$PERSISTENT_PATHS" finalized)" <"$GITHUB_ACTION_PATH/scripts/operational-audit.sh"
+
+    - name: Run read-only post-finalizer diagnostics
+      if: success() && inputs.deployment-mode == 'atomic' && inputs.post-finalize-script != '' && steps.atomic-finalize.outcome == 'success'
+      shell: bash
+      env:
+        SCRIPT: ${{ inputs.post-finalize-script }}
+        PERSISTENT_PATHS: ${{ inputs.persistent-paths }}
+        MEMORY_LIMIT: ${{ inputs.artisan-memory-limit }}
+        DEPLOY_SSH_TARGET: ${{ steps.ssh.outputs.target }}
+        DEPLOY_PHP_BINARY: ${{ steps.resolve.outputs.php }}
+        DEPLOY_DIR: ${{ inputs.deploy-dir }}
+        DEPLOY_STABLE_DIR: ${{ inputs.deploy-dir }}
+        DEPLOY_SITE_URL: ${{ inputs.site-url }}
+        DEPLOY_RELEASE_ID: ${{ steps.resolve.outputs.release-id }}
+        DEPLOY_CANDIDATE_DIR: ${{ inputs.deployment-mode == 'atomic' && inputs.atomic-layout == 'stable-directory' && inputs.deploy-dir || steps.resolve.outputs.app-dir }}
+        DEPLOY_SOURCE_COMMIT: ${{ github.sha }}
+        DEPLOY_LIVE_RELEASE: ${{ steps.atomic-finalize.outputs.live_release }}
+        DEPLOY_LIVE_COMMIT: ${{ steps.atomic-finalize.outputs.live_commit }}
+        DEPLOY_LIVE_STATE: ${{ steps.atomic-finalize.outputs.live_state }}
+        DEPLOYMENT_MODE: ${{ inputs.deployment-mode }}
+      run: |
+        set -euo pipefail
+        [ -f "$SCRIPT" ] || { echo "::error::post-finalize-script '$SCRIPT' does not exist in the checkout." >&2; exit 2; }
+        generation() {
+          timeout --kill-after=5s 60s ssh "$DEPLOY_SSH_TARGET" "bash -s -- $(printf '%q ' "$DEPLOY_DIR" "$DEPLOY_PHP_BINARY" "$MEMORY_LIMIT" "$DEPLOY_RELEASE_ID" "$DEPLOY_SOURCE_COMMIT" "$PERSISTENT_PATHS" generation)" <"$GITHUB_ACTION_PATH/scripts/operational-audit.sh"
+        }
+        before=$(generation)
+        case "$before" in
+          'runtime-audit generation=superseded') echo 'Post-finalizer diagnostic superseded by a newer deployment.'; exit 0 ;;
+          'runtime-audit generation=current') ;;
+          *) echo '::error::Post-finalizer generation proof rejected.' >&2; exit 1 ;;
+        esac
+        status=0
+        bash "$SCRIPT" || status=$?
+        after=$(generation)
+        case "$after" in
+          'runtime-audit generation=superseded') echo 'Post-finalizer diagnostic superseded by a newer deployment.'; exit 0 ;;
+          'runtime-audit generation=current') exit "$status" ;;
+          *) echo '::error::Post-finalizer generation proof rejected.' >&2; exit 1 ;;
+        esac

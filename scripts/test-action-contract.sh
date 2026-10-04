@@ -70,7 +70,7 @@ check "operational candidate audit gates selection after candidate hooks" test "
 check "selected operational audit follows stable hooks and precedes serving" test "$post_activate" -lt "$selected_audit" -a "$selected_audit" -lt "$serve"
 audit_default=$(awk '$1 == "operational-audit:" { found=1 } found && $1 == "default:" { print $2; exit }' "$action")
 check "operational audit preserves existing deployment defaults" test "$audit_default" = "'false'"
-check "all audit transports have an independent bounded SSH deadline" test "$(grep -c 'timeout --kill-after=5s 60s ssh -o BatchMode=yes' "$action")" -eq 3
+check "all audit transports have an independent bounded SSH deadline" test "$(grep -c 'timeout --kill-after=5s 60s ssh -o BatchMode=yes' "$action")" -eq 5
 check "existing operational audit rejects drift before quiescence or persistent conversion" test "$preflight" -lt "$existing_audit" -a "$existing_audit" -lt "$conversion_quiesce"
 check "fresh installations skip the existing-state audit" grep -Fq "inputs.operational-audit == 'true' && steps.atomic-preflight.outputs.existing_release == 'true'" "$action"
 check "stable-directory caches are rebuilt after selection and before stable-path hooks" test "$activate" -lt "$stable_cache" -a "$stable_cache" -lt "$webroot"
@@ -81,7 +81,7 @@ check "stable hooks finish down and cron starts only after serving proof" test "
 check "live verification gates commit" test "$serve" -lt "$verification" -a "$verification" -lt "$commit"
 check "pre-verification status requires the exact serving candidate" grep -Fq 'Selected atomic release is not the exact serving candidate' "$action"
 check "commit rechecks Laravel serving state" grep -Fq 'commit "$DEPLOY_DIR" "$RELEASE_ID" "$PHP_BINARY"' "$action"
-check "the recovery finalizer is last and unconditional on prior success" test "$commit" -lt "$finalize"
+check "the recovery finalizer follows the healthy commit" test "$commit" -lt "$finalize"
 check "finalizer uses always()" grep -Fq "if: always() && inputs.deployment-mode == 'atomic'" "$action"
 check "nonzero recovery output is captured before status propagation" grep -Fq 'output=$(ssh "$TARGET"' "$action"
 check "Passport keys must be covered by persistent state" grep -Fq 'passport-key-directory must be inside a declared persistent-path' "$action"
@@ -91,6 +91,14 @@ check "unmanaged cron has an explicit restoration phase" grep -Fq 'name: Restore
 check "candidate and live release outputs are exposed" grep -Fq 'live-state:' "$action"
 check "remote atomic state machine does not require /dev/fd process substitution" sh -c \
     '! grep -Fq '\''< <('\'' "$1"' sh "$here/scripts/atomic-release.sh"
+
+runtime=$(line_of 'name: Audit canonical selected runtime paths')
+final_runtime=$(line_of 'name: Audit finalized runtime and transaction state')
+final_hook=$(line_of 'name: Run read-only post-finalizer diagnostics')
+check "canonical runtime audit gates serving after hooks" test "$post_activate" -lt "$runtime" -a "$runtime" -lt "$serve"
+check "read-only finalized audit and hook run after unlocking" test "$finalize" -lt "$final_runtime" -a "$final_runtime" -lt "$final_hook"
+check "finalizer diagnostic receives final status" grep -Fq 'DEPLOY_LIVE_COMMIT: ${{ steps.atomic-finalize.outputs.live_commit }}' "$action"
+check "finalized audits require successful finalization" grep -Fq "steps.atomic-finalize.outcome == 'success'" "$action"
 
 echo "failures: $fails"
 exit "$fails"

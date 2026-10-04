@@ -104,6 +104,8 @@ implicit behavior change.
 | `branding-files` | four standard files | Plain names required in the source and copied atomically. |
 | **Artisan** | | |
 | `run-migrations` | `true` | `migrate --force`, followed by an assertion that none remain pending. |
+| `runtime-audit` | `false` | Atomic stable-directory only: read-only canonical cached paths and persistent database audit after final-path hooks, and again after finalization with serving/lock/inventory checks. Missing runtime leaves fail; nothing is provisioned. |
+| `post-finalize-script` | — | Runner-side read-only diagnostic after successful atomic finalization, with finalizer `DEPLOY_*` status. |
 | `operational-audit` | `false` | Atomic only: independent pending-migration assertion and read-only configured queue/failed-job aggregate reporting before selection and again before serving. |
 | `migration-order` | `after-upload` | In-place compatibility only. Atomic mode always migrates the candidate and rejects `before-upload`. |
 | `artisan-commands` | — | Extra invocations after `config:cache`, e.g. `view:clear`. |
@@ -121,6 +123,9 @@ implicit behavior change.
 | `cron-lines` | the scheduler line | Replaces the default. Each must `cd "$HOME/<deploy-dir>"` and end in `# JOB:<id>`. Artisan lines inherit `cron-memory-limit`. |
 | `extra-cron-lines` | — | Added alongside the scheduler line, same rules. Use this for queue workers; they inherit `cron-memory-limit` too. |
 | **Verification** | | |
+| `operational-audit` | `false` | Bounded read-only migration and aggregate queue audits; backlog need not be empty. |
+| `runtime-audit` | `false` | Canonical runtime paths before serving and serving/lock/inventory/database proof after finalization; atomic stable-directory only. |
+| `post-finalize-script` | — | Runner-side read-only diagnostic after successful finalization, with finalizer `DEPLOY_*` status. |
 | `health-path` | `/up` | Empty skips. |
 | `verify-web-php` | `true` | |
 | `verification-script` | — | Runner-side live checks after `artisan up`, with deployment details in `DEPLOY_*`. |
@@ -455,3 +460,42 @@ bash scripts/test-install-branding.sh
 ```
 
 Release by tagging `vX.Y.Z`; callers pin the tag's commit SHA.
+
+### Canonical runtime audit
+
+Set `runtime-audit: true` for atomic `stable-directory` deployments. After final-path
+cache refresh and post-activation hooks, the action validates the exact release/commit,
+real stable/control/shared ancestors, declared persistent link targets, and the selected
+`bootstrap/cache/config.php`. Cached PHP is decoded as bounded scalar data using the
+operational audit's existing parser; it is never executed. View source paths must exist;
+compiled views, file sessions, file-cache data/locks, and logging parents must be existing
+canonical directories with the required runtime write access. Nested aliases, vanished
+releases, path traversal, wrong kinds and symlink escapes fail with fixed key/root/type/reason
+labels. Storage cache paths are classified as disk-relative; active local storage cache disks additionally
+require a canonical existing root and data leaf. Explicit Monolog stdout/stderr/output
+streams and `/dev/null` are typed separately from file targets.
+
+The repeated audit after successful finalization also proves serving state, no
+`deploy.lock`, an empty durable `state/` inventory, zero pending migrations and a persistent
+database location (SQLite must be a real file under managed shared storage; remote database
+names are checked without printing them). Queue diagnostics remain aggregate counts.
+Neither audit creates missing runtime directories or consumes queued work. Any provisioning
+must be a separate guarded operation. Both SSH (60s) and PHP (30s) have independent deadlines
+and file-backed output limits. A post-finalizer diagnostic failure reports an unhealthy
+workflow without mutating an already finalized serving release.
+
+The same audit is reusable through a bounded SSH invocation of `scripts/operational-audit.sh`
+with `<app> <absolute-php> <memory> <expected-release> <expected-commit> <persistent-paths>
+<selected|finalized>`. Application-specific key and cron assertions belong in
+`post-finalize-script`. Failed deployments still run the unconditional recovery finalizer;
+success-only diagnostic steps never override recovery.
+
+Post-finalizer diagnostics use a durable `generation` marker written under the
+transaction lock at every `begin`. If another writer has started, finalized audits
+report `generation=superseded` and the hook wrapper skips/reclassifies the diagnostic
+instead of failing an earlier healthy deployment. The marker remains even if the
+newer transaction restores the prior code and removes its lock/state. This preserves
+read-only post-unlock checks without a race against legitimate next writers. Unlimited
+lifecycle memory (`-1`) uses a bounded 256M limit for audits. SQLite stable-path and
+relative configuration is resolved through declared managed persistent links; exact
+declared persistent log-file links are accepted too.

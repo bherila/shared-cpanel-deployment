@@ -708,6 +708,10 @@ begin() {
     ensure_real_dir "$state_root"
     ensure_real_dir "$recovery_root"
 
+    if [ -L "$control/generation" ] || { [ -e "$control/generation" ] && [ ! -f "$control/generation" ]; }; then
+        echo '::error::Deployment generation must be a regular control file.' >&2; exit 1
+    fi
+
     local now acquired=false
     now=$(date +%s)
     if mkdir "$lock" 2>/dev/null; then acquired=true; fi
@@ -718,8 +722,22 @@ begin() {
         exit 1
     }
     printf '%s\n' "$release_id" >"$lock/owner"
-    printf '%s\n' "$now" >"$lock/started"
-    printf '%s\n' "$lock_seconds" >"$lock/requested-timeout"
+    # Preserve evidence of every newer writer after its transaction is finalized.
+    # Post-unlock diagnostics can then distinguish legitimate supersession from drift.
+    local generation_temp=''
+    if ! {
+        generation_temp=$(mktemp "$control/.generation.XXXXXX") \
+            && printf '%s\n' "$release_id" >"$generation_temp" \
+            && chmod 600 "$generation_temp" \
+            && mv -T -- "$generation_temp" "$control/generation" \
+            && printf '%s\n' "$now" >"$lock/started" \
+            && printf '%s\n' "$lock_seconds" >"$lock/requested-timeout"
+    }; then
+        if [ -n "$generation_temp" ]; then rm -f -- "$generation_temp"; fi
+        if [ -f "$lock/owner" ] && [ ! -L "$lock/owner" ] && [ "$(cat "$lock/owner")" = "$release_id" ]; then rm -rf -- "$lock"; fi
+        echo '::error::Could not publish deployment generation; owned lock released.' >&2
+        exit 1
+    fi
 
     if [ -e "$transaction" ] || [ -e "$candidate" ] || [ -L "$candidate" ]; then
         rm -rf "$lock"
