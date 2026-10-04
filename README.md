@@ -92,6 +92,13 @@ Pin the action to a full commit SHA. The job holds a key that reaches every appl
 
 Outputs: `ssh-target` (the alias) and `php-binary`.
 
+The web PHP check requires the temporary probe's exact runtime response. Fetch failures and
+malformed responses (including HTTP 200 HTML pages from routing or intermediary errors) get three
+attempts, with a 20-second limit per request and two seconds between attempts. A valid response with
+the wrong PHP version or insufficient memory fails immediately. Malformed-response diagnostics show
+the HTTP status and MIME type, never the response body; check document-root and proxy routing if the
+probe never returns its fields. The temporary remote probe and local response file are removed on exit.
+
 ## What the guards refuse
 
 **Upload** (`scripts/rsync-deploy.sh`). `--delete` removes whatever the upload does not contain, and the
@@ -151,6 +158,7 @@ shellcheck scripts/*.sh
 bash scripts/test-install-cron.sh
 bash scripts/test-rsync-deploy.sh
 bash scripts/test-htaccess.sh
+bash scripts/test-verify-web-php.sh
 bash scripts/test-configure-env.sh
 bash scripts/test-assert-no-pending-migrations.sh
 ```
