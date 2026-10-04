@@ -483,6 +483,10 @@ Neither audit creates missing runtime directories or consumes queued work. Any p
 must be a separate guarded operation. Both SSH (60s) and PHP (30s) have independent deadlines
 and file-backed output limits. A post-finalizer diagnostic failure reports an unhealthy
 workflow without mutating an already finalized serving release.
+The read-only post-finalizer hook and its generation probes share a 120-second total
+deadline. A failing hook is retried once only after proving the same generation and
+an absent lock; any observed supersession ends the earlier diagnostic immediately.
+Hooks must remain read-only and safe to repeat.
 
 The same audit is reusable through a bounded SSH invocation of `scripts/operational-audit.sh`
 with `<app> <absolute-php> <memory> <expected-release> <expected-commit> <persistent-paths>

@@ -6,7 +6,7 @@ app_dir=$1 php=$2 memory=${3:-256M}
 release=${4:-} commit=${5:-} persistent=${6:-} phase=${7:-}
 if [ "$#" -eq 7 ]; then
     [[ "$app_dir" != */* && "$release" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ && "$commit" =~ ^[a-fA-F0-9]{40,64}$ ]] || exit 2
-    [[ "$phase" = selected || "$phase" = finalized || "$phase" = generation ]] || exit 2
+    [[ "$phase" = selected || "$phase" = finalized || "$phase" = generation || "$phase" = generation-unlocked ]] || exit 2
 fi
 case "$memory" in ''|-1) memory=256M ;; esac
 case "$app_dir" in
@@ -46,7 +46,10 @@ generation_state() {
                 if [ "$lock_owner" != "$release" ]; then echo superseded; return; fi
                 value_after=$(cat "$root/generation" 2>/dev/null) || value_after=''
                 if [[ "$value_after" = "$value" && -f "$root/deploy.lock/owner" && ! -L "$root/deploy.lock/owner" ]] \
-                    && [[ "$(cat "$root/deploy.lock/owner" 2>/dev/null)" = "$lock_owner" ]]; then echo current; return; fi
+                    && [[ "$(cat "$root/deploy.lock/owner" 2>/dev/null)" = "$lock_owner" ]]; then
+                    if [ "${1:-}" = unlocked ]; then echo locked; else echo current; fi
+                    return
+                fi
             fi
         fi
         sleep 0.1
@@ -61,6 +64,16 @@ check_generation() {
         return 10
     fi
 }
+if [ "$phase" = generation-unlocked ]; then
+    observed=$(generation_state unlocked) || { echo '::error::Deployment generation proof failed; diagnostics redacted.' >&2; exit 1; }
+    case "$observed" in
+        superseded) echo 'runtime-audit generation=superseded' ;;
+        current) echo 'runtime-audit generation=current lock=absent' ;;
+        locked) echo 'runtime-audit generation=current lock=present' ;;
+        *) exit 1 ;;
+    esac
+    exit 0
+fi
 if [[ "$phase" = finalized || "$phase" = generation ]]; then
     generation_status=0
     check_generation || generation_status=$?

@@ -100,6 +100,14 @@ reject() {
 write_config
 audit
 audit finalized
+audit generation-unlocked | grep -Fxq 'runtime-audit generation=current lock=absent'
+mkdir "$control/deploy.lock"
+printf 'fixture\n' > "$control/deploy.lock/owner"
+audit generation-unlocked | grep -Fxq 'runtime-audit generation=current lock=present'
+printf 'newer\n' > "$control/deploy.lock/owner"
+audit generation-unlocked | grep -Fxq 'runtime-audit generation=superseded'
+rm "$control/deploy.lock/owner"
+rmdir "$control/deploy.lock"
 # Three-argument candidate audits remain operational-only before activation.
 cp -a "$stable" "$control/releases/candidate-audit"
 env HOME="$task_home" bash "$here/operational-audit.sh" .deployments/app/releases/candidate-audit "$php" 256M > "$scratch/candidate-output"
