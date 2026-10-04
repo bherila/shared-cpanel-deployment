@@ -34,8 +34,15 @@ class Fixture {
     public function getCachedConfigPath() { return getcwd().'/bootstrap/cache/config.php'; }
     public function make($key) { return $this; }
     public function bootstrap() {
+        if (getenv('SHUTDOWN_OUTPUT')) {
+            register_shutdown_function(static function (): void {
+                $prefix = getenv('SHUTDOWN_OUTPUT') === 'nul' ? "\0" : '';
+                fwrite(STDOUT, $prefix.'SECRET_SHUTDOWN_STDOUT');
+            });
+            throw new \RuntimeException('SECRET_EXCEPTION');
+        }
         if (getenv('NOISY_BOOTSTRAP')) {
-            fwrite(STDOUT, "SECRET_DIRECT_STDOUT\n");
+            fwrite(STDOUT, getenv('NOISY_BOOTSTRAP') === 'nul' ? "\0" : "SECRET_DIRECT_STDOUT\n");
             throw new \RuntimeException('SECRET_EXCEPTION');
         }
     }
@@ -93,9 +100,22 @@ reject() {
 write_config
 audit
 audit finalized
-if NOISY_BOOTSTRAP=1 audit selected > "$scratch/noisy-output" 2>&1; then exit 1; fi
-if grep -Fq SECRET "$scratch/noisy-output"; then echo 'direct bootstrap stdout was disclosed' >&2; exit 1; fi
-grep -Fq 'diagnostics redacted' "$scratch/noisy-output"
+for bootstrap_noise in 1 nul; do
+    if NOISY_BOOTSTRAP="$bootstrap_noise" audit selected > "$scratch/noisy-output" 2>&1; then exit 1; fi
+    if grep -aFq SECRET "$scratch/noisy-output"; then echo 'direct bootstrap stdout was disclosed' >&2; exit 1; fi
+    if grep -aFq 'runtime-audit key=' "$scratch/noisy-output"; then
+        echo 'noisy failure records were relayed' >&2; exit 1
+    fi
+    grep -Fq 'diagnostics redacted' "$scratch/noisy-output"
+done
+for shutdown_output in unterminated nul; do
+    if SHUTDOWN_OUTPUT="$shutdown_output" audit selected > "$scratch/shutdown-output" 2>&1; then exit 1; fi
+    if grep -aFq SECRET "$scratch/shutdown-output"; then echo 'shutdown bootstrap stdout was disclosed' >&2; exit 1; fi
+    if grep -aFq 'runtime-audit key=' "$scratch/shutdown-output"; then
+        echo 'mixed failure records were relayed' >&2; exit 1
+    fi
+    grep -Fq 'diagnostics redacted' "$scratch/shutdown-output"
+done
 if EFFECTIVE_DB_PATH=:memory: audit selected > "$scratch/effective-db-output" 2>&1; then
     echo 'nonpersistent effective database was accepted' >&2; exit 1
 fi

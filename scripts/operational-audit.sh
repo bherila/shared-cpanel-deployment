@@ -410,8 +410,14 @@ if ! (ulimit -f 8192; exec "$timeout_binary" --signal=TERM --kill-after=2s 30s "
     if [ "$phase" = finalized ] && [ "$(generation_state || true)" = superseded ]; then
         echo 'runtime-audit generation=superseded'; exit 0
     fi
-    if [ -n "$release" ] && [ "$(wc -c <"$scratch/output")" -le 512 ] && [ "$(wc -l <"$scratch/output")" -eq 1 ] && LC_ALL=C grep -Eq '^runtime-audit key=[a-z.]+ root=[a-z-]+ type=[a-z-]+ reason=[a-z-]+$' "$scratch/output"; then
-        cat "$scratch/output" >&2
+    # Validate every record, including an unterminated last record and embedded NULs.
+    # Return only the validated diagnostic from that same read, never re-read raw output.
+    if [ -n "$release" ] && [ "$(wc -c <"$scratch/output")" -le 512 ] && failure_diagnostic=$(LC_ALL=C awk '
+        NR != 1 || $0 !~ /^runtime-audit key=[a-z.]+ root=[a-z-]+ type=[a-z-]+ reason=[a-z-]+$/ { invalid=1 }
+        NR == 1 { diagnostic=$0 }
+        END { if (NR == 1 && !invalid) { print diagnostic } else { exit 1 } }
+    ' "$scratch/output"); then
+        printf '%s\n' "$failure_diagnostic" >&2
     fi
     echo '::error::Operational audit failed or exceeded its bound; diagnostics redacted.' >&2
     exit 1
