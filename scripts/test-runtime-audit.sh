@@ -33,7 +33,19 @@ function config($key) {
 class Fixture {
     public function getCachedConfigPath() { return getcwd().'/bootstrap/cache/config.php'; }
     public function make($key) { return $this; }
-    public function bootstrap() {}
+    public function bootstrap() {
+        if ($shutdown = getenv('SHUTDOWN_OUTPUT') ?: getenv('SUCCESS_SHUTDOWN_OUTPUT')) {
+            register_shutdown_function(static function () use ($shutdown): void {
+                $prefix = $shutdown === 'nul' ? "\0" : '';
+                fwrite(STDOUT, $prefix.'SECRET_SHUTDOWN_STDOUT');
+            });
+            if (getenv('SHUTDOWN_OUTPUT')) { throw new \RuntimeException('SECRET_EXCEPTION'); }
+        }
+        if (getenv('NOISY_BOOTSTRAP')) {
+            fwrite(STDOUT, getenv('NOISY_BOOTSTRAP') === 'nul' ? "\0" : "SECRET_DIRECT_STDOUT\n");
+            throw new \RuntimeException('SECRET_EXCEPTION');
+        }
+    }
     public function paths() { return []; }
     public function databasePath($path) { return '/nonexistent/'.$path; }
     public function getMigrationFiles($paths) { return []; }
@@ -41,6 +53,9 @@ class Fixture {
     public function repositoryExists() { return true; }
     public function getRan() { return []; }
     public function resolveConnection($name) { return $this; }
+    public function getConfig() {
+        return ['driver'=>'sqlite', 'database'=>getenv('EFFECTIVE_DB_PATH') ?: getenv('DB_PATH') ?: 'storage/app/database.sqlite'];
+    }
     public function getName() { return 'sqlite'; }
     public function isDownForMaintenance() { return (bool) getenv('DOWN'); }
 }
@@ -85,6 +100,39 @@ reject() {
 write_config
 audit
 audit finalized
+for bootstrap_noise in 1 nul; do
+    if NOISY_BOOTSTRAP="$bootstrap_noise" audit selected > "$scratch/noisy-output" 2>&1; then exit 1; fi
+    if grep -aFq SECRET "$scratch/noisy-output"; then echo 'direct bootstrap stdout was disclosed' >&2; exit 1; fi
+    if grep -aFq 'runtime-audit key=' "$scratch/noisy-output"; then
+        echo 'noisy failure records were relayed' >&2; exit 1
+    fi
+    grep -Fq 'diagnostics redacted' "$scratch/noisy-output"
+done
+for shutdown_output in unterminated nul; do
+    if SHUTDOWN_OUTPUT="$shutdown_output" audit selected > "$scratch/shutdown-output" 2>&1; then exit 1; fi
+    if grep -aFq SECRET "$scratch/shutdown-output"; then echo 'shutdown bootstrap stdout was disclosed' >&2; exit 1; fi
+    if grep -aFq 'runtime-audit key=' "$scratch/shutdown-output"; then
+        echo 'mixed failure records were relayed' >&2; exit 1
+    fi
+    grep -Fq 'diagnostics redacted' "$scratch/shutdown-output"
+done
+for shutdown_output in unterminated nul; do
+    for success_mode in runtime operational; do
+        if [ "$success_mode" = runtime ]; then
+            if SUCCESS_SHUTDOWN_OUTPUT="$shutdown_output" audit selected > "$scratch/shutdown-success" 2>&1; then echo 'runtime shutdown output was accepted' >&2; exit 1; fi
+        else
+            if env HOME="$task_home" SUCCESS_SHUTDOWN_OUTPUT="$shutdown_output" bash "$here/operational-audit.sh" app "$php" 256M > "$scratch/shutdown-success" 2>&1; then echo 'operational shutdown output was accepted' >&2; exit 1; fi
+        fi
+        if grep -aEq 'SECRET|identity=exact|operational-audit pending_migrations=' "$scratch/shutdown-success"; then
+            echo 'unvalidated success output or a shutdown secret was relayed' >&2; exit 1
+        fi
+        grep -Fq 'diagnostics redacted' "$scratch/shutdown-success"
+    done
+done
+if EFFECTIVE_DB_PATH=:memory: audit selected > "$scratch/effective-db-output" 2>&1; then
+    echo 'nonpersistent effective database was accepted' >&2; exit 1
+fi
+grep -Fq 'key=database.' "$scratch/effective-db-output"
 DB_PATH="$stable/storage/app/database.sqlite" audit finalized > /dev/null
 env HOME="$task_home" bash "$here/operational-audit.sh" app "$php" -1 fixture "$commit" $'storage\npublic/ohif' selected > /dev/null
 for fixture in stale traversal absolute stream log-directory wrong-type; do write_config "$fixture"; reject selected "$fixture"; done
