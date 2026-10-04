@@ -100,6 +100,25 @@ reject() {
 write_config
 audit
 audit finalized
+# Three-argument candidate audits remain operational-only before activation.
+cp -a "$stable" "$control/releases/candidate-audit"
+env HOME="$task_home" bash "$here/operational-audit.sh" .deployments/app/releases/candidate-audit "$php" 256M > "$scratch/candidate-output"
+grep -q '^operational-audit pending_migrations=0' "$scratch/candidate-output"
+if grep -Fq runtime-audit "$scratch/candidate-output"; then echo 'candidate audit enabled runtime mode' >&2; exit 1; fi
+rm -rf "$control/releases/candidate-audit"
+# Valid persistent inventories above the old 64-path cap remain supported.
+persistent_inventory=$'storage\npublic/ohif'
+for number in {1..63}; do
+    mkdir "$shared/extra$number"
+    ln -s "$shared/extra$number" "$stable/extra$number"
+    persistent_inventory+=$'\n'"extra$number"
+done
+env HOME="$task_home" bash "$here/operational-audit.sh" app "$php" 256M fixture "$commit" "$persistent_inventory" selected > "$scratch/large-inventory-output"
+grep -Fxq 'runtime-audit identity=exact paths=canonical writable=yes database=persistent phase=selected' "$scratch/large-inventory-output"
+for number in {1..63}; do
+    rm "$stable/extra$number"
+    rmdir "$shared/extra$number"
+done
 for bootstrap_noise in 1 nul; do
     if NOISY_BOOTSTRAP="$bootstrap_noise" audit selected > "$scratch/noisy-output" 2>&1; then exit 1; fi
     if grep -aFq SECRET "$scratch/noisy-output"; then echo 'direct bootstrap stdout was disclosed' >&2; exit 1; fi
@@ -149,6 +168,35 @@ ln -s "$scratch/SECRET" "$shared/storage/framework/escape"
 write_config cache-escape
 reject selected escape
 write_config
+mkdir "$scratch/generation-bin"
+cat > "$scratch/generation-bin/cat" <<'CAT'
+#!/usr/bin/env bash
+set -euo pipefail
+if [ "${1:-}" = "$HOME/.deployments/app/generation" ]; then
+    calls=0
+    [ ! -f "$GENERATION_CAT_CALLS" ] || calls=$(<"$GENERATION_CAT_CALLS")
+    calls=$((calls + 1))
+    printf '%s' "$calls" > "$GENERATION_CAT_CALLS"
+    if [ "$calls" = 1 ]; then mkdir "$HOME/.deployments/app/deploy.lock"; fi
+    if [ "$calls" = 2 ]; then printf 'newer-transaction\n' > "$HOME/.deployments/app/deploy.lock/owner"; fi
+fi
+exec /bin/cat "$@"
+CAT
+chmod +x "$scratch/generation-bin/cat"
+env HOME="$task_home" PATH="$scratch/generation-bin:$PATH" GENERATION_CAT_CALLS="$scratch/generation-calls" bash "$here/operational-audit.sh" app "$php" 256M fixture "$commit" $'storage\npublic/ohif' generation > "$scratch/owner-transition-output"
+grep -Fxq 'runtime-audit generation=superseded' "$scratch/owner-transition-output"
+rm "$control/deploy.lock/owner"
+rmdir "$control/deploy.lock"
+# A missing owner that never resolves must fail without guessing a generation.
+mkdir "$control/deploy.lock"
+if env HOME="$task_home" bash "$here/operational-audit.sh" app "$php" 256M fixture "$commit" $'storage\npublic/ohif' generation > "$scratch/missing-owner-output" 2>&1; then exit 1; fi
+grep -Fq 'generation proof failed' "$scratch/missing-owner-output"
+printf 'malformed/SECRET_OWNER\n' > "$control/deploy.lock/owner"
+if env HOME="$task_home" bash "$here/operational-audit.sh" app "$php" 256M fixture "$commit" $'storage\npublic/ohif' generation > "$scratch/malformed-owner-output" 2>&1; then exit 1; fi
+grep -Fq 'generation proof failed' "$scratch/malformed-owner-output"
+if grep -Fq SECRET "$scratch/malformed-owner-output"; then echo 'malformed owner was disclosed' >&2; exit 1; fi
+rm "$control/deploy.lock/owner"
+rmdir "$control/deploy.lock"
 mkdir "$control/deploy.lock"
 printf 'fixture\n' > "$control/deploy.lock/owner"
 audit selected > /dev/null
