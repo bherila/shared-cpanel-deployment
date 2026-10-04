@@ -48,11 +48,11 @@ class Fixture {
     }
     public function paths() { return []; }
     public function databasePath($path) { return '/nonexistent/'.$path; }
-    public function getMigrationFiles($paths) { return []; }
+    public function getMigrationFiles($paths) { return getenv('PENDING_MIGRATION') ? ['synthetic-pending'=>'synthetic'] : []; }
     public function getRepository() { return $this; }
     public function repositoryExists() { return true; }
     public function getRan() { return []; }
-    public function resolveConnection($name) { return $this; }
+    public function resolveConnection($name) { if (getenv('DATABASE_FAILURE')) { throw new \RuntimeException('SECRET_DATABASE_FAILURE'); } return $this; }
     public function getConfig() {
         return ['driver'=>'sqlite', 'database'=>getenv('EFFECTIVE_DB_PATH') ?: getenv('DB_PATH') ?: 'storage/app/database.sqlite'];
     }
@@ -278,3 +278,33 @@ for number in {1..65}; do
     links+=$'\n'"extra-$number"
 done
 HOME="$task_home" bash "$here/operational-audit.sh" app "$php" 256M fixture "$commit" "$links" selected | grep '^runtime-audit ' > /dev/null
+
+# Operational failures after successful path validation must not claim cache drift.
+for operational_failure in PENDING_MIGRATION DATABASE_FAILURE; do
+    if env HOME="$task_home" "$operational_failure=1" bash "$here/operational-audit.sh" app "$php" 256M fixture "$commit" $'storage\npublic/ohif' selected > "$scratch/operational-failure" 2>&1; then exit 1; fi
+    if grep -Eq 'runtime-audit key=|SECRET' "$scratch/operational-failure"; then echo 'operational error misclassified or disclosed' >&2; exit 1; fi
+    grep -Fq 'diagnostics redacted' "$scratch/operational-failure"
+done
+# A newer begin's failed generation write can expose a transient PHP lock,
+# then clean up without advancing the generation. Retry the current proof.
+cat > "$scratch/retry-php" <<'SH'
+#!/usr/bin/env bash
+set -uo pipefail
+calls=0
+[[ ! -f "$RETRY_CALLS" ]] || calls=$(cat "$RETRY_CALLS")
+calls=$((calls+1)); printf '%s' "$calls" > "$RETRY_CALLS"
+if [[ "$calls" == 1 ]]; then
+    mkdir "$HOME/.deployments/app/deploy.lock"
+    printf 'aborted-begin\n' > "$HOME/.deployments/app/deploy.lock/owner"
+    "$REAL_PHP" "$@"
+    status=$?
+    rm "$HOME/.deployments/app/deploy.lock/owner"
+    rmdir "$HOME/.deployments/app/deploy.lock"
+    exit "$status"
+fi
+exec "$REAL_PHP" "$@"
+SH
+chmod +x "$scratch/retry-php"
+env HOME="$task_home" REAL_PHP="$php" RETRY_CALLS="$scratch/retry-calls" bash "$here/operational-audit.sh" app "$scratch/retry-php" 256M fixture "$commit" $'storage\npublic/ohif' finalized > "$scratch/retry-proof"
+[[ "$(cat "$scratch/retry-calls")" == 2 ]]
+grep -Fxq 'runtime-audit identity=exact paths=canonical writable=yes database=persistent phase=finalized' "$scratch/retry-proof"
