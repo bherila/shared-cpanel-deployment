@@ -546,5 +546,25 @@ check "finalization preserves generation evidence" test "$(cat "$HOME/.deploymen
 begin_and_upload generation-second
 check "the next begin advances generation under its lock" test "$(cat "$HOME/.deployments/app/generation")" = generation-second
 
+# Quota/I/O failures before a transaction exists must release the owned mutex.
+for failed_command in mktemp chmod mv; do
+    setup
+    actual_command=$(command -v "$failed_command")
+    cat > "$root/bin/$failed_command" <<'SH'
+#!/usr/bin/env bash
+for argument in "$@"; do
+    case "$argument" in */.generation.*|*/generation) exit 91 ;; esac
+done
+exec "$ACTUAL_COMMAND" "$@"
+SH
+    chmod +x "$root/bin/$failed_command"
+    export ACTUAL_COMMAND="$actual_command"
+    if bash "$script" begin app quota-failure "$commit" 7200 3 maintenance '' storage > "$root/failure.log" 2>&1; then
+        check "generation $failed_command failure is rejected" false
+    fi
+    check "generation $failed_command failure releases its owned lock" test ! -e "$HOME/.deployments/app/deploy.lock"
+    check "generation $failed_command failure leaves no transaction" test ! -e "$HOME/.deployments/app/state/quota-failure"
+done
+
 echo "failures: $fails"
 exit "$fails"
