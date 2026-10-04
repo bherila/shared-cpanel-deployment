@@ -8,7 +8,8 @@ task_home="$scratch/home"
 control="$task_home/.deployments/app"
 mkdir -p "$control" "$scratch/bin"
 export FIXTURE_HOME="$task_home" CONTROL="$control" TRACE_ROOT="$scratch"
-export SCRIPT="$scratch/hook" GITHUB_ACTION_PATH="$(dirname "$here")"
+GITHUB_ACTION_PATH=$(dirname "$here")
+export SCRIPT="$scratch/hook" GITHUB_ACTION_PATH
 export DEPLOY_SSH_TARGET=fixture DEPLOY_DIR=app DEPLOY_RELEASE_ID=fixture
 export DEPLOY_SOURCE_COMMIT=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 export PERSISTENT_PATHS=storage MEMORY_LIMIT=256M
