@@ -65,6 +65,7 @@ remote_ssh() {
 }
 
 cleanup() {
+    [ -z "${response_file:-}" ] || rm -f "$response_file"
     remote_ssh "rm -f \"\$HOME/$remote\"" <&- || echo "::warning::Could not delete ~/$remote; remove it by hand." >&2
 }
 trap cleanup EXIT
@@ -76,7 +77,35 @@ header('Cache-Control: no-store');
 echo PHP_MAJOR_VERSION, '.', PHP_MINOR_VERSION, '|', ini_get('memory_limit'), '|', PHP_SAPI;
 PHP
 
-answer=$(curl --fail --silent --show-error --retry 3 --retry-all-errors --max-time 20 "$site_url/$name")
+# A proxy or newly reloaded web handler can return an HTML page with HTTP 200. curl's HTTP
+# retries do not catch that. Retry missing/malformed responses, but a real runtime that does
+# not meet the application's requirements must fail immediately below.
+response_file=$(mktemp)
+runtime_pattern='^[0-9]+\.[0-9]+\|(-1|[0-9]+[KkMmGg]?)\|[A-Za-z0-9_-]+$'
+for attempt in 1 2 3; do
+    if response_meta=$(curl --fail --silent --show-error --max-time 20 \
+        --header 'Cache-Control: no-cache' --output "$response_file" \
+        --write-out '%{http_code}|%{content_type}' "$site_url/$name"); then
+        answer=$(<"$response_file")
+        if [[ $answer =~ $runtime_pattern ]]; then
+            break
+        fi
+        reason='did not return the PHP runtime fields'
+    else
+        reason='could not fetch the PHP runtime fields'
+    fi
+    IFS='|' read -r http_status content_type <<<"$response_meta"
+    # Never print the body: an intermediary/error page might contain unrelated sensitive data.
+    # Ignore arbitrary response header text as well; display only a recognizable MIME type.
+    content_type=${content_type%%;*}
+    [[ $content_type =~ ^[A-Za-z0-9.+-]+/[A-Za-z0-9.+-]+$ ]] || content_type=unknown
+    if [ "$attempt" -eq 3 ]; then
+        echo "::error::The web PHP probe $reason after 3 attempts (HTTP $http_status, content-type $content_type). Check the site's document root, rewrite rules, and proxy/WAF routing; this response does not establish a PHP version." >&2
+        exit 1
+    fi
+    echo "::warning::The web PHP probe $reason (HTTP $http_status, content-type $content_type); retrying ($attempt/3)." >&2
+    sleep 2
+done
 IFS='|' read -r php memory sapi <<<"$answer"
 
 echo "Web handler: PHP $php, memory_limit=$memory, SAPI $sapi."
