@@ -481,3 +481,13 @@ with `<app> <absolute-php> <memory> <expected-release> <expected-commit> <persis
 <selected|finalized>`. Application-specific key and cron assertions belong in
 `post-finalize-script`. Failed deployments still run the unconditional recovery finalizer;
 success-only diagnostic steps never override recovery.
+
+Post-finalizer diagnostics use a durable `generation` marker written under the
+transaction lock at every `begin`. If another writer has started, finalized audits
+report `generation=superseded` and the hook wrapper skips/reclassifies the diagnostic
+instead of failing an earlier healthy deployment. The marker remains even if the
+newer transaction restores the prior code and removes its lock/state. This preserves
+read-only post-unlock checks without a race against legitimate next writers. Unlimited
+lifecycle memory (`-1`) uses a bounded 256M limit for audits. SQLite stable-path and
+relative configuration is resolved through declared managed persistent links; exact
+declared persistent log-file links are accepted too.

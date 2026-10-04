@@ -16,6 +16,7 @@ mkdir -p "$stable"/{vendor,bootstrap/cache,resources/views,public} "$control"/{r
 ln -s "$shared/storage" "$stable/storage"
 ln -s "$shared/public/ohif" "$stable/public/ohif"
 touch "$stable/vendor/autoload.php" "$shared/storage/app/database.sqlite"
+printf 'fixture\n' > "$control/generation"
 printf 'release=fixture\ncommit=%s\n' "$commit" > "$stable/.deploy-release"
 cat > "$stable/bootstrap/app.php" <<'PHP'
 <?php
@@ -26,7 +27,7 @@ function config($key) {
         'queue.default' => 'sync', 'queue.connections.sync' => ['driver'=>'sync'],
         'queue.failed' => ['driver'=>null],
         'database.default' => 'sqlite',
-        'database.connections.sqlite' => ['driver'=>'sqlite','database'=>getenv('HOME').'/.deployments/app/shared/storage/app/database.sqlite'],
+        'database.connections.sqlite' => ['driver'=>'sqlite','database'=>getenv('DB_PATH') ?: 'storage/app/database.sqlite'],
     };
 }
 class Fixture {
@@ -70,6 +71,7 @@ switch ($argv[2]) {
  case 'stream': $config['logging']['channels']['stderr']['handler_with']['stream'] = 'php://filter/SECRET'; break;
  case 'log-directory': $config['logging']['channels']['single']['path'] = $stable.'/storage/logs'; break;
  case 'wrong-type': $config['session']['files'] = ['SECRET']; break;
+ case 'persistent-log': $config['logging']['channels']['single']['path'] = $stable.'/runtime.log'; break;
  case 'cache-escape': $config['cache']['stores']['file']['path'] = $stable.'/storage/framework/escape'; break;
 }
 echo '<?php return '.var_export($config, true).';';
@@ -83,6 +85,8 @@ reject() {
 write_config
 audit
 audit finalized
+DB_PATH="$stable/storage/app/database.sqlite" audit finalized > /dev/null
+env HOME="$task_home" bash "$here/operational-audit.sh" app "$php" -1 fixture "$commit" $'storage\npublic/ohif' selected > /dev/null
 for fixture in stale traversal absolute stream log-directory wrong-type; do write_config "$fixture"; reject selected "$fixture"; done
 write_config
 rmdir "$shared/storage/framework/cache/data"
@@ -118,5 +122,36 @@ chmod 500 "$shared/storage/framework/views"
 # Root ignores mode bits; the CI runner is an ordinary user.
 if [ "$(id -u)" != 0 ]; then reject selected unwritable; fi
 chmod 700 "$shared/storage/framework/views"
+touch "$shared/runtime.log"
+ln -s "$shared/runtime.log" "$stable/runtime.log"
+write_config persistent-log
+env HOME="$task_home" bash "$here/operational-audit.sh" app "$php" 256M fixture "$commit" $'storage\npublic/ohif\nruntime.log' finalized > /dev/null
+write_config
+printf 'newer-transaction\n' > "$control/generation"
+mkdir "$control/deploy.lock"
+audit finalized | grep -Fxq 'runtime-audit generation=superseded'
+mv "$stable" "$scratch/stable-in-transition"
+audit finalized | grep -Fxq 'runtime-audit generation=superseded'
+mv "$scratch/stable-in-transition" "$stable"
+rmdir "$control/deploy.lock"
+# A newer transaction may have restored the exact prior release and unlocked.
+audit finalized | grep -Fxq 'runtime-audit generation=superseded'
+printf 'fixture\n' > "$control/generation"
+# Simulate a newer begin after the initial generation read, both when the
+# PHP proof succeeds and when its transient error would otherwise fail CI.
+cat > "$scratch/racing-php" <<'RACE'
+#!/usr/bin/env bash
+printf 'newer-transaction\n' > "$HOME/.deployments/app/generation"
+if [ "${FAIL_AUDIT:-}" = 1 ]; then echo SECRET; exit 1; fi
+exec "$REAL_PHP" "$@"
+RACE
+chmod +x "$scratch/racing-php"
+for fail in 0 1; do
+    printf 'fixture\n' > "$control/generation"
+    env HOME="$task_home" REAL_PHP="$php" FAIL_AUDIT="$fail" bash "$here/operational-audit.sh" app "$scratch/racing-php" 256M fixture "$commit" $'storage\npublic/ohif' finalized > "$scratch/race-output"
+    grep -Fxq 'runtime-audit generation=superseded' "$scratch/race-output"
+    if grep -Fq SECRET "$scratch/race-output"; then exit 1; fi
+done
+printf 'fixture\n' > "$control/generation"
 audit finalized > /dev/null
 echo 'Canonical runtime, redaction, persistence and finalization fixtures passed.'

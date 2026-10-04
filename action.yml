@@ -1291,6 +1291,8 @@ runs:
       shell: bash
       env:
         SCRIPT: ${{ inputs.post-finalize-script }}
+        PERSISTENT_PATHS: ${{ inputs.persistent-paths }}
+        MEMORY_LIMIT: ${{ inputs.artisan-memory-limit }}
         DEPLOY_SSH_TARGET: ${{ steps.ssh.outputs.target }}
         DEPLOY_PHP_BINARY: ${{ steps.resolve.outputs.php }}
         DEPLOY_DIR: ${{ inputs.deploy-dir }}
@@ -1306,4 +1308,20 @@ runs:
       run: |
         set -euo pipefail
         [ -f "$SCRIPT" ] || { echo "::error::post-finalize-script '$SCRIPT' does not exist in the checkout." >&2; exit 2; }
-        bash "$SCRIPT"
+        generation() {
+          timeout --kill-after=5s 60s ssh "$DEPLOY_SSH_TARGET" "bash -s -- $(printf '%q ' "$DEPLOY_DIR" "$DEPLOY_PHP_BINARY" "$MEMORY_LIMIT" "$DEPLOY_RELEASE_ID" "$DEPLOY_SOURCE_COMMIT" "$PERSISTENT_PATHS" generation)" <"$GITHUB_ACTION_PATH/scripts/operational-audit.sh"
+        }
+        before=$(generation)
+        case "$before" in
+          'runtime-audit generation=superseded') echo 'Post-finalizer diagnostic superseded by a newer deployment.'; exit 0 ;;
+          'runtime-audit generation=current') ;;
+          *) echo '::error::Post-finalizer generation proof rejected.' >&2; exit 1 ;;
+        esac
+        status=0
+        bash "$SCRIPT" || status=$?
+        after=$(generation)
+        case "$after" in
+          'runtime-audit generation=superseded') echo 'Post-finalizer diagnostic superseded by a newer deployment.'; exit 0 ;;
+          'runtime-audit generation=current') exit "$status" ;;
+          *) echo '::error::Post-finalizer generation proof rejected.' >&2; exit 1 ;;
+        esac

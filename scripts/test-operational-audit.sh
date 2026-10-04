@@ -62,6 +62,7 @@ PHP
 php=$(command -v php)
 audit() { bash "$here/operational-audit.sh" app "$php" 256M; }
 audit >"$scratch/output"
+bash "$here/operational-audit.sh" app "$php" -1 >"$scratch/unlimited-lifecycle"
 grep -Fq 'pending_total=7 failed_applicability=database failed_total=3' "$scratch/output"
 for driver in sync null redis; do
     DRIVER=$driver audit >"$scratch/output"
@@ -75,7 +76,7 @@ for failure in ERROR PENDING MISSING_TABLE; do
 done
 if DRIVER=unknown audit >"$scratch/output" 2>&1; then exit 1; fi
 if bash "$here/operational-audit.sh" ../app "$php" 256M >"$scratch/output" 2>&1; then exit 1; fi
-if bash "$here/operational-audit.sh" app "$php" -1 >"$scratch/output" 2>&1; then exit 1; fi
+if bash "$here/operational-audit.sh" app "$php" 0 >"$scratch/output" 2>&1; then exit 1; fi
 mkdir -p "$HOME/app/bootstrap/cache"
 LATE_CACHE=1 audit >"$scratch/output"
 grep -Fq 'pending_total=7 failed_applicability=database failed_total=3' "$scratch/output"

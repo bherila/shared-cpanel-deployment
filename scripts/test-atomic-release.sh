@@ -537,5 +537,14 @@ bash "$script" finalize app migrate-symlink-moved "$php" >/dev/null
 check_expr "interruption after symlink target move proves the exact real stable directory" '[ -d "$HOME/app" ] && [ ! -L "$HOME/app" ]'
 check "post-move symlink migration interruption restores exact old code serving" test "$(status_field migrate-symlink-moved live_release)" = symlink-moved-source -a "$(status_field migrate-symlink-moved live_state)" = serving
 
+# Durable generation survives finalization and records every later writer.
+setup
+begin_and_upload generation-first
+check "begin records the exact diagnostic generation" test "$(cat "$HOME/.deployments/app/generation")" = generation-first
+bash "$script" finalize app generation-first "$php" > /dev/null
+check "finalization preserves generation evidence" test "$(cat "$HOME/.deployments/app/generation")" = generation-first
+begin_and_upload generation-second
+check "the next begin advances generation under its lock" test "$(cat "$HOME/.deployments/app/generation")" = generation-second
+
 echo "failures: $fails"
 exit "$fails"

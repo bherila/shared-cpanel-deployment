@@ -6,9 +6,9 @@ app_dir=$1 php=$2 memory=${3:-256M}
 release=${4:-} commit=${5:-} persistent=${6:-} phase=${7:-}
 if [ "$#" -eq 7 ]; then
     [[ "$app_dir" != */* && "$release" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ && "$commit" =~ ^[a-fA-F0-9]{40,64}$ ]] || exit 2
-    [[ "$phase" = selected || "$phase" = finalized ]] || exit 2
+    [[ "$phase" = selected || "$phase" = finalized || "$phase" = generation ]] || exit 2
 fi
-[ -n "$memory" ] || memory=256M
+case "$memory" in ''|-1) memory=256M ;; esac
 case "$app_dir" in
     ''|.|..|/*|*..*|*[!A-Za-z0-9._/-]*) exit 2 ;;
     .deployments/*/releases/*)
@@ -19,7 +19,38 @@ esac
 [[ "$php" = /* && -x "$php" && "$memory" =~ ^[1-9][0-9]*[KMGkmg]$ ]] || exit 2
 timeout_binary=$(command -v timeout)
 [[ "$timeout_binary" = /* && -x "$timeout_binary" ]] || exit 2
-cd "$HOME/$app_dir"
+# The durable generation changes under the lock at every begin, including
+# transactions that later fail and restore the prior release. It distinguishes
+# supersession even after the newer transaction has removed its lock/state.
+generation_state() {
+    local root="$HOME/.deployments/$app_dir" value directory
+    for directory in "$HOME" "$HOME/.deployments" "$root"; do
+        [[ -d "$directory" && ! -L "$directory" && "$(readlink -f "$directory")" = "$directory" ]] || return 1
+    done
+    [[ -f "$root/generation" && ! -L "$root/generation" && "$(wc -c <"$root/generation")" -le 128 ]] || return 1
+    value=$(cat "$root/generation")
+    [[ "$value" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || return 1
+    if [ "$value" = "$release" ]; then echo current; else echo superseded; fi
+}
+check_generation() {
+    local observed
+    observed=$(generation_state) || { echo '::error::Deployment generation proof failed; diagnostics redacted.' >&2; return 1; }
+    if [ "$observed" = superseded ]; then
+        echo 'runtime-audit generation=superseded'
+        return 10
+    fi
+}
+if [[ "$phase" = finalized || "$phase" = generation ]]; then
+    generation_status=0
+    check_generation || generation_status=$?
+    if [ "$generation_status" = 10 ]; then exit 0; fi
+    [ "$generation_status" = 0 ] || exit 1
+    if [ "$phase" = generation ]; then echo 'runtime-audit generation=current'; exit 0; fi
+fi
+if ! cd "$HOME/$app_dir" 2>/dev/null; then
+    if [ "$phase" = finalized ] && [ "$(generation_state || true)" = superseded ]; then echo 'runtime-audit generation=superseded'; exit 0; fi
+    echo '::error::Audit application directory unavailable; diagnostics redacted.' >&2; exit 1
+fi
 [ -f vendor/autoload.php ] && [ -f bootstrap/app.php ] || exit 1
 scratch=$(mktemp -d)
 trap 'rm -rf -- "$scratch"' EXIT
@@ -277,7 +308,12 @@ try {
             if (!is_string($path) || $path === '' || strlen($path) > 4096 || str_contains($path, "\0")
                 || $path[0] !== '/' || str_ends_with($path, '/')) { $fail('logging.path', 'managed', 'file', 'type'); }
             $directory(dirname($path), 'logging.parent', true);
-            if (is_link($path) || (file_exists($path) && (!is_file($path) || !is_writable($path))) || basename($path) === '.' || basename($path) === '..') {
+            $declaredFile = false;
+            foreach ($links as $link) {
+                if ($path === $stable.'/'.$link && is_link($path) && is_file($shared.'/'.$link)
+                    && realpath($path) === $shared.'/'.$link) { $declaredFile = true; break; }
+            }
+            if ((is_link($path) && !$declaredFile) || (file_exists($path) && (!is_file($path) || !is_writable($path))) || basename($path) === '.' || basename($path) === '..') {
                 $fail('logging.path', 'managed', 'file', 'type-or-unwritable');
             }
         }
@@ -343,7 +379,13 @@ try {
         if (!in_array($dbDriver, ['sqlite', 'mysql', 'mariadb', 'pgsql', 'sqlsrv'], true)) { $fail('database.driver', 'managed', 'database', 'type'); }
         if ($dbDriver === 'sqlite') {
             $dbPath = $database['database'] ?? null;
-            if (!is_string($dbPath) || !str_starts_with($dbPath, $shared.'/') || realpath($dbPath) !== $dbPath || !is_file($dbPath)) {
+            if (!is_string($dbPath) || $dbPath === '' || strlen($dbPath) > 4096 || str_contains($dbPath, "\0")) {
+                $fail('database.location', 'shared', 'file', 'type');
+            }
+            $dbPath = str_starts_with($dbPath, '/') ? $dbPath : $stable.'/'.$dbPath;
+            $parent = $directory(dirname($dbPath), 'database.parent', true);
+            if (!str_starts_with($parent, $shared.'/') || realpath($dbPath) !== $parent.'/'.basename($dbPath)
+                || !is_file($dbPath) || !is_writable($dbPath)) {
                 $fail('database.location', 'shared', 'file', 'nonpersistent');
             }
         } elseif (!is_string($database['database'] ?? null) || $database['database'] === '') { $fail('database.location', 'external', 'database', 'missing'); }
@@ -363,11 +405,17 @@ try {
 }
 PHP
 if ! (ulimit -f 8192; exec "$timeout_binary" --signal=TERM --kill-after=2s 30s "$php" -d "memory_limit=$memory" "$scratch/audit.php" "$release" "$commit" "$persistent" "$app_dir" "$phase") </dev/null >"$scratch/output" 2>"$scratch/error"; then
+    if [ "$phase" = finalized ] && [ "$(generation_state || true)" = superseded ]; then
+        echo 'runtime-audit generation=superseded'; exit 0
+    fi
     if [ -n "$release" ] && [ "$(wc -c <"$scratch/output")" -le 512 ] && LC_ALL=C grep -Eq '^runtime-audit key=[a-z.]+ root=[a-z-]+ type=[a-z-]+ reason=[a-z-]+$' "$scratch/output"; then
         cat "$scratch/output" >&2
     fi
     echo '::error::Operational audit failed or exceeded its bound; diagnostics redacted.' >&2
     exit 1
+fi
+if [ "$phase" = finalized ] && [ "$(generation_state || true)" = superseded ]; then
+    echo 'runtime-audit generation=superseded'; exit 0
 fi
 if [ -n "$release" ]; then
     expected="runtime-audit identity=exact paths=canonical writable=yes database=persistent phase=$phase"

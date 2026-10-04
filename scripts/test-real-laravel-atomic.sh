@@ -95,6 +95,7 @@ mkdir -p "$runtime_control/shared/storage"/{framework/cache/data,framework/views
 # Laravel's skeleton has an absolute DB path under the original app. Override
 # only the synthetic database location and rebuild at this fixture's final path.
 printf '\nDB_DATABASE=%s\n' "$runtime_control/shared/storage/app/database.sqlite" >> "$runtime_app/.env"
+printf 'runtime-fixture\n' > "$runtime_control/generation"
 printf 'release=runtime-fixture\ncommit=%040d\n' 1 > "$runtime_app/.deploy-release"
 (cd "$runtime_app" && php artisan config:clear >/dev/null && php artisan config:cache >/dev/null)
 fixture_commit=$(printf '%040d' 1)
