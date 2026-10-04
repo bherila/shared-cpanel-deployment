@@ -161,3 +161,24 @@ done
 printf 'fixture\n' > "$control/generation"
 audit finalized > /dev/null
 echo 'Canonical runtime, redaction, persistence and finalization fixtures passed.'
+
+# Candidate paths must retain the original three-argument audit mode.
+mkdir -p "$control/releases/candidate"
+cp -r "$stable/vendor" "$stable/bootstrap" "$control/releases/candidate/"
+HOME="$task_home" bash "$here/operational-audit.sh" .deployments/app/releases/candidate "$php" 256M | grep '^operational-audit ' > /dev/null
+# An ownerless lock snapshot during mkdir/owner initialization is retried.
+mkdir "$control/deploy.lock"
+(sleep 0.2; printf 'new-owner\n' > "$control/deploy.lock/owner") &
+writer=$!
+audit generation | grep -Fxq 'runtime-audit generation=superseded'
+wait "$writer"
+rm "$control/deploy.lock/owner"; rmdir "$control/deploy.lock"
+
+# The accepted persistence inventory may exceed 64 paths.
+links=$'storage\npublic/ohif'
+for number in {1..65}; do
+    mkdir "$shared/extra-$number"
+    ln -s "$shared/extra-$number" "$stable/extra-$number"
+    links+=$'\n'"extra-$number"
+done
+HOME="$task_home" bash "$here/operational-audit.sh" app "$php" 256M fixture "$commit" "$links" selected | grep '^runtime-audit ' > /dev/null

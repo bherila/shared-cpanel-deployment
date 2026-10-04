@@ -12,8 +12,8 @@ case "$memory" in ''|-1) memory=256M ;; esac
 case "$app_dir" in
     ''|.|..|/*|*..*|*[!A-Za-z0-9._/-]*) exit 2 ;;
     .deployments/*/releases/*)
-        IFS=/ read -r prefix app component release extra <<<"$app_dir"
-        [ "$prefix" = .deployments ] && [ "$component" = releases ] && [ -n "$app" ] && [ -n "$release" ] && [ -z "$extra" ] || exit 2 ;;
+        IFS=/ read -r prefix app component candidate_release extra <<<"$app_dir"
+        [ "$prefix" = .deployments ] && [ "$component" = releases ] && [ -n "$app" ] && [ -n "$candidate_release" ] && [ -z "$extra" ] || exit 2 ;;
     .*|*/*) exit 2 ;;
 esac
 [[ "$php" = /* && -x "$php" && "$memory" =~ ^[1-9][0-9]*[KMGkmg]$ ]] || exit 2
@@ -27,20 +27,31 @@ generation_state() {
     for directory in "$HOME" "$HOME/.deployments" "$root"; do
         [[ -d "$directory" && ! -L "$directory" && "$(readlink -f "$directory")" = "$directory" ]] || return 1
     done
-    [[ -f "$root/generation" && ! -L "$root/generation" && "$(wc -c <"$root/generation")" -le 128 ]] || return 1
-    value=$(cat "$root/generation")
-    [[ "$value" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || return 1
-    # A new owner's lock proves supersession even in the narrow interval before
-    # its atomic generation rename. An ambiguous/unfinished owner fails closed.
-    if [[ -e "$root/deploy.lock" || -L "$root/deploy.lock" ]]; then
-        [[ -d "$root/deploy.lock" && ! -L "$root/deploy.lock" && -f "$root/deploy.lock/owner" && ! -L "$root/deploy.lock/owner" \
-            && "$(wc -c <"$root/deploy.lock/owner")" -le 128 ]] || return 1
-        local lock_owner
-        lock_owner=$(cat "$root/deploy.lock/owner")
-        [[ "$lock_owner" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || return 1
-        if [ "$lock_owner" != "$release" ]; then echo superseded; return; fi
-    fi
-    if [ "$value" = "$release" ]; then echo current; else echo superseded; fi
+    local attempt lock_owner value_after
+    # mkdir/owner creation and owner removal/rmdir are separate operations.
+    # Retry incomplete snapshots; only a stable valid snapshot is authoritative.
+    for ((attempt=0; attempt<10; attempt++)); do
+        if [[ -f "$root/generation" && ! -L "$root/generation" ]] \
+            && [[ "$(wc -c <"$root/generation" 2>/dev/null)" -le 128 ]] \
+            && value=$(cat "$root/generation" 2>/dev/null) \
+            && [[ "$value" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
+            if [ "$value" != "$release" ]; then echo superseded; return; fi
+            if [[ ! -e "$root/deploy.lock" && ! -L "$root/deploy.lock" ]]; then
+                value_after=$(cat "$root/generation" 2>/dev/null) || value_after=''
+                if [[ "$value_after" = "$value" && ! -e "$root/deploy.lock" && ! -L "$root/deploy.lock" ]]; then echo current; return; fi
+            elif [[ -d "$root/deploy.lock" && ! -L "$root/deploy.lock" && -f "$root/deploy.lock/owner" && ! -L "$root/deploy.lock/owner" ]] \
+                && [[ "$(wc -c <"$root/deploy.lock/owner" 2>/dev/null)" -le 128 ]] \
+                && lock_owner=$(cat "$root/deploy.lock/owner" 2>/dev/null) \
+                && [[ "$lock_owner" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
+                if [ "$lock_owner" != "$release" ]; then echo superseded; return; fi
+                value_after=$(cat "$root/generation" 2>/dev/null) || value_after=''
+                if [[ "$value_after" = "$value" && -f "$root/deploy.lock/owner" && ! -L "$root/deploy.lock/owner" ]] \
+                    && [[ "$(cat "$root/deploy.lock/owner" 2>/dev/null)" = "$lock_owner" ]]; then echo current; return; fi
+            fi
+        fi
+        sleep 0.1
+    done
+    return 1
 }
 check_generation() {
     local observed
@@ -228,7 +239,7 @@ try {
             $fail('deployment.metadata', 'stable', 'file', 'identity');
         }
         $links = preg_split('/\s+/', trim($argv[3]), -1, PREG_SPLIT_NO_EMPTY);
-        if (!is_array($links) || $links === [] || count($links) > 64) { $fail('deployment.persistence', 'shared', 'link', 'bound'); }
+        if (!is_array($links) || $links === []) { $fail('deployment.persistence', 'shared', 'link', 'bound'); }
         foreach ($links as $link) {
             if (!preg_match('~\A[A-Za-z0-9_-]+(?:[./][A-Za-z0-9_-]+)*\z~', $link) || str_contains($link, '..')) {
                 $fail('deployment.persistence', 'shared', 'link', 'invalid');
