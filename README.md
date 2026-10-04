@@ -123,6 +123,9 @@ implicit behavior change.
 | `cron-lines` | the scheduler line | Replaces the default. Each must `cd "$HOME/<deploy-dir>"` and end in `# JOB:<id>`. Artisan lines inherit `cron-memory-limit`. |
 | `extra-cron-lines` | — | Added alongside the scheduler line, same rules. Use this for queue workers; they inherit `cron-memory-limit` too. |
 | **Verification** | | |
+| `operational-audit` | `false` | Bounded read-only migration and aggregate queue audits; backlog need not be empty. |
+| `runtime-audit` | `false` | Canonical runtime paths before serving and serving/lock/inventory/database proof after finalization; atomic stable-directory only. |
+| `post-finalize-script` | — | Runner-side read-only diagnostic after successful finalization, with finalizer `DEPLOY_*` status. |
 | `health-path` | `/up` | Empty skips. |
 | `verify-web-php` | `true` | |
 | `verification-script` | — | Runner-side live checks after `artisan up`, with deployment details in `DEPLOY_*`. |

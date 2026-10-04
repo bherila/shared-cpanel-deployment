@@ -100,7 +100,7 @@ printf 'release=runtime-fixture\ncommit=%040d\n' 1 > "$runtime_app/.deploy-relea
 fixture_commit=$(printf '%040d' 1)
 bash "$here/operational-audit.sh" runtime-fixture "$php_binary" 256M runtime-fixture "$fixture_commit" storage selected
 bash "$here/operational-audit.sh" runtime-fixture "$php_binary" 256M runtime-fixture "$fixture_commit" storage finalized
-rmdir "$runtime_control/shared/storage/framework/cache/data"
+mv "$runtime_control/shared/storage/framework/cache/data" "$scratch/runtime-cache-data"
 if bash "$here/operational-audit.sh" runtime-fixture "$php_binary" 256M runtime-fixture "$fixture_commit" storage selected >"$scratch/runtime-error" 2>&1; then
     echo 'missing real Laravel runtime leaf was accepted' >&2; exit 1
 fi
