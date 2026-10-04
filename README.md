@@ -104,6 +104,8 @@ implicit behavior change.
 | `branding-files` | four standard files | Plain names required in the source and copied atomically. |
 | **Artisan** | | |
 | `run-migrations` | `true` | `migrate --force`, followed by an assertion that none remain pending. |
+| `runtime-audit` | `false` | Atomic stable-directory only: read-only canonical cached paths and persistent database audit after final-path hooks, and again after finalization with serving/lock/inventory checks. Missing runtime leaves fail; nothing is provisioned. |
+| `post-finalize-script` | — | Runner-side read-only diagnostic after successful atomic finalization, with finalizer `DEPLOY_*` status. |
 | `operational-audit` | `false` | Atomic only: independent pending-migration assertion and read-only configured queue/failed-job aggregate reporting before selection and again before serving. |
 | `migration-order` | `after-upload` | In-place compatibility only. Atomic mode always migrates the candidate and rejects `before-upload`. |
 | `artisan-commands` | — | Extra invocations after `config:cache`, e.g. `view:clear`. |
@@ -447,3 +449,32 @@ bash scripts/test-install-branding.sh
 ```
 
 Release by tagging `vX.Y.Z`; callers pin the tag's commit SHA.
+
+### Canonical runtime audit
+
+Set `runtime-audit: true` for atomic `stable-directory` deployments. After final-path
+cache refresh and post-activation hooks, the action validates the exact release/commit,
+real stable/control/shared ancestors, declared persistent link targets, and the selected
+`bootstrap/cache/config.php`. Cached PHP is decoded as bounded scalar data using the
+operational audit's existing parser; it is never executed. View source paths must exist;
+compiled views, file sessions, file-cache data/locks, and logging parents must be existing
+canonical directories with the required runtime write access. Nested aliases, vanished
+releases, path traversal, wrong kinds and symlink escapes fail with fixed key/root/type/reason
+labels. Storage cache paths are classified as disk-relative; local disks additionally
+require a canonical existing root and data leaf. Explicit Monolog stdout/stderr/output
+streams and `/dev/null` are typed separately from file targets.
+
+The repeated audit after successful finalization also proves serving state, no
+`deploy.lock`, an empty durable `state/` inventory, zero pending migrations and a persistent
+database location (SQLite must be a real file under managed shared storage; remote database
+names are checked without printing them). Queue diagnostics remain aggregate counts.
+Neither audit creates missing runtime directories or consumes queued work. Any provisioning
+must be a separate guarded operation. Both SSH (60s) and PHP (30s) have independent deadlines
+and file-backed output limits. A post-finalizer diagnostic failure reports an unhealthy
+workflow without mutating an already finalized serving release.
+
+The same audit is reusable through a bounded SSH invocation of `scripts/operational-audit.sh`
+with `<app> <absolute-php> <memory> <expected-release> <expected-commit> <persistent-paths>
+<selected|finalized>`. Application-specific key and cron assertions belong in
+`post-finalize-script`. Failed deployments still run the unconditional recovery finalizer;
+success-only diagnostic steps never override recovery.

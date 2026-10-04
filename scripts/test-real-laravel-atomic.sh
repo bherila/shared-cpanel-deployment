@@ -82,6 +82,30 @@ ENV
 bash "$here/operational-audit.sh" app "$php_binary" 256M
 (cd "$HOME/app" && php artisan config:cache >/dev/null)
 bash "$here/operational-audit.sh" app "$php_binary" 256M
+# Prove the canonical audit against real Laravel 12/13 cache serialization.
+# Use a separate app identity so these read-only fixtures cannot change the
+# existing app's atomic recovery scenario.
+runtime_app="$HOME/runtime-fixture"
+runtime_control="$HOME/.deployments/runtime-fixture"
+cp -a "$HOME/app" "$runtime_app"
+mkdir -p "$runtime_control"/{shared,releases,state}
+mv "$runtime_app/storage" "$runtime_control/shared/storage"
+ln -s "$runtime_control/shared/storage" "$runtime_app/storage"
+mkdir -p "$runtime_control/shared/storage"/{framework/cache/data,framework/views,framework/sessions}
+# Laravel's skeleton has an absolute DB path under the original app. Override
+# only the synthetic database location and rebuild at this fixture's final path.
+printf '\nDB_DATABASE=%s\n' "$runtime_control/shared/storage/app/database.sqlite" >> "$runtime_app/.env"
+printf 'release=runtime-fixture\ncommit=%040d\n' 1 > "$runtime_app/.deploy-release"
+(cd "$runtime_app" && php artisan config:clear >/dev/null && php artisan config:cache >/dev/null)
+fixture_commit=$(printf '%040d' 1)
+bash "$here/operational-audit.sh" runtime-fixture "$php_binary" 256M runtime-fixture "$fixture_commit" storage selected
+bash "$here/operational-audit.sh" runtime-fixture "$php_binary" 256M runtime-fixture "$fixture_commit" storage finalized
+rmdir "$runtime_control/shared/storage/framework/cache/data"
+if bash "$here/operational-audit.sh" runtime-fixture "$php_binary" 256M runtime-fixture "$fixture_commit" storage selected >"$scratch/runtime-error" 2>&1; then
+    echo 'missing real Laravel runtime leaf was accepted' >&2; exit 1
+fi
+grep -Fq 'key=cache.file.path' "$scratch/runtime-error"
+rm -rf "$runtime_app" "$runtime_control"
 (cd "$HOME/app" && php artisan config:clear >/dev/null)
 cp "$HOME/app/bootstrap/providers.php" "$scratch/original-providers"
 mkdir -p "$HOME/app/app/Services"

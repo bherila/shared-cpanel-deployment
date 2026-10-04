@@ -72,6 +72,9 @@ jobs:
       - name: operational-audit.sh harness
         run: bash scripts/test-operational-audit.sh
 
+      - name: canonical runtime audit harness
+        run: bash scripts/test-runtime-audit.sh
+
       - name: ensure-passport-keys.sh harness
         run: bash scripts/test-ensure-passport-keys.sh
 
