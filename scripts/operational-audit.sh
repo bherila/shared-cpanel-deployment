@@ -30,6 +30,16 @@ generation_state() {
     [[ -f "$root/generation" && ! -L "$root/generation" && "$(wc -c <"$root/generation")" -le 128 ]] || return 1
     value=$(cat "$root/generation")
     [[ "$value" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || return 1
+    # A new owner's lock proves supersession even in the narrow interval before
+    # its atomic generation rename. An ambiguous/unfinished owner fails closed.
+    if [[ -e "$root/deploy.lock" || -L "$root/deploy.lock" ]]; then
+        [[ -d "$root/deploy.lock" && ! -L "$root/deploy.lock" && -f "$root/deploy.lock/owner" && ! -L "$root/deploy.lock/owner" \
+            && "$(wc -c <"$root/deploy.lock/owner")" -le 128 ]] || return 1
+        local lock_owner
+        lock_owner=$(cat "$root/deploy.lock/owner")
+        [[ "$lock_owner" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || return 1
+        if [ "$lock_owner" != "$release" ]; then echo superseded; return; fi
+    fi
     if [ "$value" = "$release" ]; then echo current; else echo superseded; fi
 }
 check_generation() {

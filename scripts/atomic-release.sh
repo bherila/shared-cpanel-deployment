@@ -722,6 +722,14 @@ begin() {
         exit 1
     }
     printf '%s\n' "$release_id" >"$lock/owner"
+    # Preserve evidence of every newer writer after its transaction is finalized.
+    # Post-unlock diagnostics can then distinguish legitimate supersession from drift.
+    local generation_temp
+    generation_temp=$(mktemp "$control/.generation.XXXXXX")
+    printf '%s\n' "$release_id" >"$generation_temp"
+    chmod 600 "$generation_temp"
+    mv -T -- "$generation_temp" "$control/generation"
+
     printf '%s\n' "$now" >"$lock/started"
     printf '%s\n' "$lock_seconds" >"$lock/requested-timeout"
 
@@ -748,13 +756,6 @@ begin() {
     write_value committed false
     write_value previous_was_maintenance false
     write_value phase begun
-    # Preserve evidence of every newer writer after its transaction is finalized.
-    # Post-unlock diagnostics can then distinguish legitimate supersession from drift.
-    local generation_temp
-    generation_temp=$(mktemp "$control/.generation.XXXXXX")
-    printf '%s\n' "$release_id" >"$generation_temp"
-    chmod 600 "$generation_temp"
-    mv -T -- "$generation_temp" "$control/generation"
 
     local selected
     selected=$(selected_target)

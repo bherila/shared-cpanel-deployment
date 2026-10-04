@@ -102,8 +102,10 @@ write_config cache-escape
 reject selected escape
 write_config
 mkdir "$control/deploy.lock"
+printf 'fixture\n' > "$control/deploy.lock/owner"
 audit selected > /dev/null
 reject finalized held-lock
+rm "$control/deploy.lock/owner"
 rmdir "$control/deploy.lock"
 mkdir "$control/state/incomplete"
 reject finalized incomplete-transaction
@@ -127,12 +129,16 @@ ln -s "$shared/runtime.log" "$stable/runtime.log"
 write_config persistent-log
 env HOME="$task_home" bash "$here/operational-audit.sh" app "$php" 256M fixture "$commit" $'storage\npublic/ohif\nruntime.log' finalized > /dev/null
 write_config
-printf 'newer-transaction\n' > "$control/generation"
 mkdir "$control/deploy.lock"
+printf 'newer-transaction\n' > "$control/deploy.lock/owner"
+# New owner is visible before the generation rename or transaction initialization.
+audit finalized | grep -Fxq 'runtime-audit generation=superseded'
+printf 'newer-transaction\n' > "$control/generation"
 audit finalized | grep -Fxq 'runtime-audit generation=superseded'
 mv "$stable" "$scratch/stable-in-transition"
 audit finalized | grep -Fxq 'runtime-audit generation=superseded'
 mv "$scratch/stable-in-transition" "$stable"
+rm "$control/deploy.lock/owner"
 rmdir "$control/deploy.lock"
 # A newer transaction may have restored the exact prior release and unlocked.
 audit finalized | grep -Fxq 'runtime-audit generation=superseded'
