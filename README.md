@@ -132,6 +132,13 @@ implicit behavior change.
 
 Outputs: `ssh-target`, `php-binary`, `release-id`, `live-release`, `live-commit` and `live-state`.
 
+The web PHP check requires the temporary probe's exact runtime response. Fetch failures and
+malformed responses (including HTTP 200 HTML pages from routing or intermediary errors) get three
+attempts, with a 20-second limit per request and two seconds between attempts. A valid response with
+the wrong PHP version or insufficient memory fails immediately. Malformed-response diagnostics show
+the HTTP status and MIME type, never the response body; check document-root and proxy routing if the
+probe never returns its fields. The temporary remote probe and local response file are removed on exit.
+
 ## Atomic release contract
 
 The stable path and cron working directory do not change. By default the path is a real directory,
@@ -443,6 +450,7 @@ bash scripts/test-rsync-atomic-release.sh
 bash scripts/test-rsync-deploy.sh
 bash scripts/test-rsync-migrations.sh
 bash scripts/test-htaccess.sh
+bash scripts/test-verify-web-php.sh
 bash scripts/test-configure-env.sh
 bash scripts/test-assert-no-pending-migrations.sh
 bash scripts/test-remote-artisan.sh
