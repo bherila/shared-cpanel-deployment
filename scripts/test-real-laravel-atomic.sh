@@ -101,6 +101,19 @@ printf 'release=runtime-fixture\ncommit=%040d\n' 1 > "$runtime_app/.deploy-relea
 fixture_commit=$(printf '%040d' 1)
 bash "$here/operational-audit.sh" runtime-fixture "$php_binary" 256M runtime-fixture "$fixture_commit" storage selected
 bash "$here/operational-audit.sh" runtime-fixture "$php_binary" 256M runtime-fixture "$fixture_commit" storage finalized
+# The raw DB_DATABASE remains managed, while Laravel's DB_URL selects a copy
+# outside persistent storage. Keep identical schema/data so only persistence,
+# rather than pending migrations or aggregate queue reads, decides the verdict.
+cp "$runtime_app/.env" "$scratch/runtime-env"
+cp "$runtime_control/shared/storage/app/database.sqlite" "$scratch/url-override.sqlite"
+printf '\nDB_URL=sqlite:///%s\n' "$scratch/url-override.sqlite" >> "$runtime_app/.env"
+(cd "$runtime_app" && php artisan config:clear >/dev/null && php artisan config:cache >/dev/null)
+if bash "$here/operational-audit.sh" runtime-fixture "$php_binary" 256M runtime-fixture "$fixture_commit" storage selected >"$scratch/url-override-error" 2>&1; then
+    echo 'Laravel DB_URL override outside persistent storage was accepted' >&2; exit 1
+fi
+grep -Fq 'key=database.parent' "$scratch/url-override-error"
+cp "$scratch/runtime-env" "$runtime_app/.env"
+(cd "$runtime_app" && php artisan config:clear >/dev/null && php artisan config:cache >/dev/null)
 mv "$runtime_control/shared/storage/framework/cache/data" "$scratch/runtime-cache-data"
 if bash "$here/operational-audit.sh" runtime-fixture "$php_binary" 256M runtime-fixture "$fixture_commit" storage selected >"$scratch/runtime-error" 2>&1; then
     echo 'missing real Laravel runtime leaf was accepted' >&2; exit 1

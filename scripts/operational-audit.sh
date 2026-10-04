@@ -382,8 +382,10 @@ try {
         $failedState = 'external';
     } else { throw new RuntimeException('unsupported failed queue'); }
     if ($runtime) {
-        $databaseName = config('database.default');
-        $database = is_string($databaseName) ? config('database.connections.'.$databaseName) : null;
+        // Reuse the connection already selected by the migration audit. Laravel resolves
+        // DB_URL and driver aliases before constructing it; raw cached fields may describe
+        // a persistent file while the effective connection actually uses :memory:.
+        $database = $migrator->resolveConnection(null)->getConfig();
         if (!is_array($database)) { $fail('database.default', 'managed', 'database', 'type'); }
         $dbDriver = $database['driver'] ?? null;
         if (!in_array($dbDriver, ['sqlite', 'mysql', 'mariadb', 'pgsql', 'sqlsrv'], true)) { $fail('database.driver', 'managed', 'database', 'type'); }
@@ -418,8 +420,14 @@ if ! (ulimit -f 8192; exec "$timeout_binary" --signal=TERM --kill-after=2s 30s "
     if [ "$phase" = finalized ] && [ "$(generation_state || true)" = superseded ]; then
         echo 'runtime-audit generation=superseded'; exit 0
     fi
-    if [ -n "$release" ] && [ "$(wc -c <"$scratch/output")" -le 512 ] && LC_ALL=C grep -Eq '^runtime-audit key=[a-z.]+ root=[a-z-]+ type=[a-z-]+ reason=[a-z-]+$' "$scratch/output"; then
-        cat "$scratch/output" >&2
+    # Validate every record, including an unterminated last record and embedded NULs.
+    # Return only the validated diagnostic from that same read, never re-read raw output.
+    if [ -n "$release" ] && [ "$(wc -c <"$scratch/output")" -le 512 ] && failure_diagnostic=$(LC_ALL=C awk '
+        NR != 1 || $0 !~ /^runtime-audit key=[a-z.]+ root=[a-z-]+ type=[a-z-]+ reason=[a-z-]+$/ { invalid=1 }
+        NR == 1 { diagnostic=$0 }
+        END { if (NR == 1 && !invalid) { print diagnostic } else { exit 1 } }
+    ' "$scratch/output"); then
+        printf '%s\n' "$failure_diagnostic" >&2
     fi
     echo '::error::Operational audit failed or exceeded its bound; diagnostics redacted.' >&2
     exit 1
@@ -427,17 +435,21 @@ fi
 if [ "$phase" = finalized ] && [ "$(generation_state || true)" = superseded ]; then
     echo 'runtime-audit generation=superseded'; exit 0
 fi
-if [ -n "$release" ]; then
-    expected="runtime-audit identity=exact paths=canonical writable=yes database=persistent phase=$phase"
-    if [ "$(head -1 "$scratch/output")" != "$expected" ]; then
-        echo '::error::Runtime audit output rejected; diagnostics redacted.' >&2
-        exit 1
-    fi
-    head -1 "$scratch/output"
-    sed -i '1d' "$scratch/output"
-fi
-if [ "$(wc -c <"$scratch/output")" -gt 512 ] || ! LC_ALL=C grep -Eq '^operational-audit pending_migrations=0 queue_driver=(sync|null|database|redis|sqs|beanstalkd|deferred|background|failover) queue_applicability=(database|no-persistent-queue|external) pending_total=([0-9]+|not-counted) failed_applicability=(database|disabled|external) failed_total=([0-9]+|not-counted)$' "$scratch/output" || [ "$(wc -l <"$scratch/output")" -ne 1 ]; then
+expected=''
+[ -z "$release" ] || expected="runtime-audit identity=exact paths=canonical writable=yes database=persistent phase=$phase"
+# Accept the complete success response before emitting any proof. A PHP shutdown
+# callback can still append output after the audit has printed its own fields.
+if [ "$(wc -c <"$scratch/output")" -gt 512 ] || ! validated_audit=$(LC_ALL=C awk -v expected="$expected" '
+    NR == 1 && expected != "" { if ($0 != expected) { invalid=1 }; next }
+    NR != (expected != "" ? 2 : 1) || $0 !~ /^operational-audit pending_migrations=0 queue_driver=(sync|null|database|redis|sqs|beanstalkd|deferred|background|failover) queue_applicability=(database|no-persistent-queue|external) pending_total=([0-9]+|not-counted) failed_applicability=(database|disabled|external) failed_total=([0-9]+|not-counted)$/ { invalid=1; next }
+    { aggregate=$0 }
+    END {
+        if (invalid || NR != (expected != "" ? 2 : 1)) { exit 1 }
+        if (expected != "") { print expected }
+        print aggregate
+    }
+' "$scratch/output"); then
     echo '::error::Operational audit output rejected; diagnostics redacted.' >&2
     exit 1
 fi
-cat "$scratch/output"
+printf '%s\n' "$validated_audit"
