@@ -60,6 +60,9 @@ jobs:
       - name: htaccess.sh harness
         run: bash scripts/test-htaccess.sh
 
+      - name: verify-web-php.sh harness
+        run: bash scripts/test-verify-web-php.sh
+
       - name: configure-env.sh harness
         run: bash scripts/test-configure-env.sh
 
