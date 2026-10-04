@@ -379,6 +379,9 @@ runs:
         if [ -n "$POST_FINALIZE_SCRIPT" ] && [ "$DEPLOYMENT_MODE" != atomic ]; then
           echo '::error::post-finalize-script requires atomic mode.' >&2; exit 2
         fi
+        if [ -n "$POST_FINALIZE_SCRIPT" ] && [ ! -f "$POST_FINALIZE_SCRIPT" ]; then
+          echo '::error::post-finalize-script does not exist in the checkout.' >&2; exit 2
+        fi
         case $DEPLOY_DIR_INPUT in
           '' | . | .. | .* | *[!A-Za-z0-9._-]*)
             echo "::error::deploy-dir must be a plain, non-hidden account-home name." >&2; exit 2 ;;
