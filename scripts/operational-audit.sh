@@ -210,6 +210,9 @@ try {
             throw new RuntimeException('snapshot');
         }
     }
+    // Config decoding is complete; later operational errors need their own
+    // classification rather than inheriting the config-cache diagnostic.
+    unset($key, $rootType, $kind, $reason);
     if ($runtime) {
         $fail = static function (string $k, string $r, string $t, string $why) use (&$key, &$rootType, &$kind, &$reason): never {
             $key = $k; $rootType = $r; $kind = $t; $reason = $why;
@@ -427,10 +430,25 @@ try {
     exit(1);
 }
 PHP
-if ! (ulimit -f 8192; exec "$timeout_binary" --signal=TERM --kill-after=2s 30s "$php" -d "memory_limit=$memory" "$scratch/audit.php" "$release" "$commit" "$persistent" "$app_dir" "$phase") </dev/null >"$scratch/output" 2>"$scratch/error"; then
-    if [ "$phase" = finalized ] && [ "$(generation_state || true)" = superseded ]; then
-        echo 'runtime-audit generation=superseded'; exit 0
+audit_started=$SECONDS
+audit_success=false
+for ((audit_attempt=0; audit_attempt<2; audit_attempt++)); do
+    audit_remaining=$((30 - (SECONDS - audit_started)))
+    [ "$audit_remaining" -gt 0 ] || break
+    if (ulimit -f 8192; exec "$timeout_binary" --signal=TERM --kill-after=2s "${audit_remaining}s" "$php" -d "memory_limit=$memory" "$scratch/audit.php" "$release" "$commit" "$persistent" "$app_dir" "$phase") </dev/null >"$scratch/output" 2>"$scratch/error"; then
+        audit_success=true
+        break
     fi
+    if [ "$phase" = finalized ]; then
+        observed=$(generation_state || true)
+        if [ "$observed" = superseded ]; then echo 'runtime-audit generation=superseded'; exit 0; fi
+        # A failed newer begin may leave no durable marker after removing its
+        # transient lock. Re-prove finalized state once within the same budget.
+        if [ "$audit_attempt" = 0 ] && [ "$observed" = current ] && [ ! -e "$HOME/.deployments/$app_dir/deploy.lock" ] && [ ! -L "$HOME/.deployments/$app_dir/deploy.lock" ]; then continue; fi
+    fi
+    break
+done
+if [ "$audit_success" != true ]; then
     # Validate every record, including an unterminated last record and embedded NULs.
     # Return only the validated diagnostic from that same read, never re-read raw output.
     if [ -n "$release" ] && [ "$(wc -c <"$scratch/output")" -le 512 ] && failure_diagnostic=$(LC_ALL=C awk '
