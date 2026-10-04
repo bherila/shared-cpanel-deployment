@@ -34,12 +34,12 @@ class Fixture {
     public function getCachedConfigPath() { return getcwd().'/bootstrap/cache/config.php'; }
     public function make($key) { return $this; }
     public function bootstrap() {
-        if (getenv('SHUTDOWN_OUTPUT')) {
-            register_shutdown_function(static function (): void {
-                $prefix = getenv('SHUTDOWN_OUTPUT') === 'nul' ? "\0" : '';
+        if ($shutdown = getenv('SHUTDOWN_OUTPUT') ?: getenv('SUCCESS_SHUTDOWN_OUTPUT')) {
+            register_shutdown_function(static function () use ($shutdown): void {
+                $prefix = $shutdown === 'nul' ? "\0" : '';
                 fwrite(STDOUT, $prefix.'SECRET_SHUTDOWN_STDOUT');
             });
-            throw new \RuntimeException('SECRET_EXCEPTION');
+            if (getenv('SHUTDOWN_OUTPUT')) { throw new \RuntimeException('SECRET_EXCEPTION'); }
         }
         if (getenv('NOISY_BOOTSTRAP')) {
             fwrite(STDOUT, getenv('NOISY_BOOTSTRAP') === 'nul' ? "\0" : "SECRET_DIRECT_STDOUT\n");
@@ -115,6 +115,19 @@ for shutdown_output in unterminated nul; do
         echo 'mixed failure records were relayed' >&2; exit 1
     fi
     grep -Fq 'diagnostics redacted' "$scratch/shutdown-output"
+done
+for shutdown_output in unterminated nul; do
+    for success_mode in runtime operational; do
+        if [ "$success_mode" = runtime ]; then
+            if SUCCESS_SHUTDOWN_OUTPUT="$shutdown_output" audit selected > "$scratch/shutdown-success" 2>&1; then echo 'runtime shutdown output was accepted' >&2; exit 1; fi
+        else
+            if env HOME="$task_home" SUCCESS_SHUTDOWN_OUTPUT="$shutdown_output" bash "$here/operational-audit.sh" app "$php" 256M > "$scratch/shutdown-success" 2>&1; then echo 'operational shutdown output was accepted' >&2; exit 1; fi
+        fi
+        if grep -aEq 'SECRET|identity=exact|operational-audit pending_migrations=' "$scratch/shutdown-success"; then
+            echo 'unvalidated success output or a shutdown secret was relayed' >&2; exit 1
+        fi
+        grep -Fq 'diagnostics redacted' "$scratch/shutdown-success"
+    done
 done
 if EFFECTIVE_DB_PATH=:memory: audit selected > "$scratch/effective-db-output" 2>&1; then
     echo 'nonpersistent effective database was accepted' >&2; exit 1
