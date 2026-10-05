@@ -27,7 +27,7 @@ check "atomic deployment defaults to a cPanel-compatible real stable directory" 
 health_expect_default=$(awk '$1 == "health-expect:" { found=1 } found && $1 == "default:" { $1=""; sub(/^ /, ""); print; exit }' "$action")
 check "health requires Laravel's /up text by default" test "$health_expect_default" = 'Application up'
 check "the health check is fetched from the origin, not through the proxy" grep -Fq 'scripts/origin-fetch.sh" >"$raw"' "$action"
-check "the health check no longer curls the public URL from the runner" bash -c '! grep -Fq -- "\"\${SITE_URL%/}\$HEALTH_PATH\"" "$1"' _ "$action"
+check "the health check no longer curls the public URL from the runner" bash -c '! sed -n "/- id: site-health/,/- id: atomic-live-status/p" "$1" | sed "/^[[:space:]]*#/d" | grep -Eq "(^|[;&[:space:]])curl[[:space:]]"' _ "$action"
 check "the health text is matched in a file, not at the end of a pipe" grep -Fq 'grep -Fq -- "$HEALTH_EXPECT" "$body"' "$action"
 check "the web PHP probe is fetched from the origin" grep -Fq 'origin-fetch.sh' "$here/scripts/verify-web-php.sh"
 check "legacy in-place mode remains an explicit branch" grep -Fq "inputs.deployment-mode == 'in-place'" "$action"

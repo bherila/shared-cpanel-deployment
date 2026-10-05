@@ -74,7 +74,7 @@ implicit behavior change.
 | `ssh-alias` | `cpanel-deploy` | Returned as the `ssh-target` output for your own steps. Every call through the alias shares one multiplexed connection (`ControlMaster auto`, `ControlPersist 15m`), so a deploy authenticates once instead of tripping a host's per-source connection-rate limit partway through. |
 | **Application** | | |
 | `deploy-dir` | required | Plain directory name under the account home. Never a webroot. |
-| `site-url` | required | https URL whose host names the site for the health and PHP checks. Both are fetched from the host's own web server under that name (`curl --resolve` to its own addresses, over SSH), not through any proxy or CDN in front of it, so a proxy rule that challenges the runner's location cannot answer for the application. |
+| `site-url` | required | https URL whose host names the site for the health and PHP checks. Each origin request has one deadline covering SSH, local address discovery and HTTP. Both are fetched from the host's own web server under that name (`curl --resolve` to its own addresses, over SSH), not through any proxy or CDN in front of it, so a proxy rule that challenges the runner's location cannot answer for the application. |
 | `php-version` | `8.5` | Web handler, CLI binary and the PHP check. |
 | `php-binary` | `/opt/cpanel/ea-php85/root/usr/bin/php` | Derived from `php-version`. cPanel's default `php` is older. |
 | `deployment-mode` | `atomic` | Safe v2 versioned releases. `in-place` is the explicit v1 escape hatch. |
@@ -126,9 +126,9 @@ implicit behavior change.
 | `operational-audit` | `false` | Bounded read-only migration and aggregate queue audits; backlog need not be empty. |
 | `runtime-audit` | `false` | Canonical runtime paths before serving and serving/lock/inventory/database proof after finalization; atomic stable-directory only. |
 | `post-finalize-script` | — | Runner-side read-only diagnostic after successful finalization, with finalizer `DEPLOY_*` status. |
-| `health-path` | `/up` | Empty skips. |
-| `health-expect` | `Application up` | Text the health body must contain; empty accepts any 2xx. A proxy's challenge or error page is a 2xx too, so keep it set. |
-| `verify-web-php` | `true` | |
+| `health-path` | `/up` | Empty skips. Paths with a query are fetched only from the domain’s cPanel binding; missing bindings fail without sending credentials to fallback vhosts. Query values are omitted from health logs. |
+| `health-expect` | `Application up` | Complete origin response bodies are limited to 256 KiB; PHP runtime records are limited to 512 bytes. Text the health body must contain; empty accepts any 2xx. A proxy's challenge or error page is a 2xx too, so keep it set. |
+| `verify-web-php` | `true` | The fetch retry budget is 75 seconds including SSH and host discovery. Probe creation and cleanup each have a separate 20-second SSH bound. Complete wrong-runtime responses fail definitively; HTML from another host address is skipped. |
 | `verification-script` | — | Runner-side live checks after `artisan up`, with deployment details in `DEPLOY_*`. |
 
 Outputs: `ssh-target`, `php-binary`, `release-id`, `live-release`, `live-commit` and `live-state`.
