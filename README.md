@@ -74,7 +74,7 @@ implicit behavior change.
 | `ssh-alias` | `cpanel-deploy` | Returned as the `ssh-target` output for your own steps. Every call through the alias shares one multiplexed connection (`ControlMaster auto`, `ControlPersist 15m`), so a deploy authenticates once instead of tripping a host's per-source connection-rate limit partway through. |
 | **Application** | | |
 | `deploy-dir` | required | Plain directory name under the account home. Never a webroot. |
-| `site-url` | required | https URL for the health and PHP checks. |
+| `site-url` | required | https URL whose host names the site for the health and PHP checks. Both are fetched from the host's own web server under that name (`curl --resolve` to its own addresses, over SSH), not through any proxy or CDN in front of it, so a proxy rule that challenges the runner's location cannot answer for the application. |
 | `php-version` | `8.5` | Web handler, CLI binary and the PHP check. |
 | `php-binary` | `/opt/cpanel/ea-php85/root/usr/bin/php` | Derived from `php-version`. cPanel's default `php` is older. |
 | `deployment-mode` | `atomic` | Safe v2 versioned releases. `in-place` is the explicit v1 escape hatch. |
@@ -127,6 +127,7 @@ implicit behavior change.
 | `runtime-audit` | `false` | Canonical runtime paths before serving and serving/lock/inventory/database proof after finalization; atomic stable-directory only. |
 | `post-finalize-script` | — | Runner-side read-only diagnostic after successful finalization, with finalizer `DEPLOY_*` status. |
 | `health-path` | `/up` | Empty skips. |
+| `health-expect` | `Application up` | Text the health body must contain; empty accepts any 2xx. A proxy's challenge or error page is a 2xx too, so keep it set. |
 | `verify-web-php` | `true` | |
 | `verification-script` | — | Runner-side live checks after `artisan up`, with deployment details in `DEPLOY_*`. |
 
@@ -282,11 +283,20 @@ and remote processes have stopped, an operator must recover/remove an abandoned 
 Every successfully finalized failure becomes retention-eligible; cleanup preserves the live release,
 the prior release and genuinely incomplete transactions.
 
-Initialization failures before upload clean up only this invocation's candidate, transaction and lock,
-after proving their directory identities and the exact lock owner. Cleanup uses sibling renames without
-allocating new directories or metadata files, so a persistent metadata-allocation failure does not
-prevent releasing a proven owner. Changed ancestors, replacement directories, an incomplete owner
-record, or a failed cleanup rename retain the lock and recovery evidence for deliberate inspection.
+Initialization prepares unique private lock, transaction and candidate directories before publishing
+canonical names. The complete exclusive owner and lock inode are retained before no-clobber publication;
+another writer's canonical directory can never supply the acquired identity. Failures before upload
+clean up only proven directories from this invocation. Cleanup detaches each directory inside its
+original parent without allocating new directories or metadata files, then removes flat metadata
+through a working directory bound to its verified inode. It never recursively deletes a pathname:
+replacement releases, transaction payloads and owner records remain untouched. Final `rmdir` can only
+remove an empty directory; POSIX does not offer an inode-conditional empty-directory removal.
+
+Changed ancestors, replacement directories, an incomplete owner record, or failed cleanup retain the
+lock and recovery evidence for deliberate inspection. An incomplete owner before publication remains
+private; later `begin` refuses hidden `.begin-cleanup-*` evidence in control, releases or state until
+it has been inspected and deliberately recovered. A persistent metadata-allocation failure does not
+prevent cleanup when ownership is proven.
 
 ## What the guards refuse
 
@@ -477,6 +487,7 @@ bash scripts/test-rsync-deploy.sh
 bash scripts/test-rsync-migrations.sh
 bash scripts/test-htaccess.sh
 bash scripts/test-verify-web-php.sh
+bash scripts/test-origin-fetch.sh
 bash scripts/test-configure-env.sh
 bash scripts/test-assert-no-pending-migrations.sh
 bash scripts/test-remote-artisan.sh

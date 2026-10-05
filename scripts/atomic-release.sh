@@ -702,6 +702,41 @@ begin_lock_matches() {
         && printf '%s\n' "$release_id" | cmp -s -- "$lock/owner" -
 }
 
+begin_empty_directory() (
+    local path=$1 identity=$2
+    cd -P -- "$path" || exit 1
+    begin_directory_matches . "$identity" || exit 1
+    shopt -s nullglob dotglob
+    local entries=(./*)
+    [ "${#entries[@]}" -eq 0 ] && begin_directory_matches "$path" "$identity"
+)
+
+# A held working directory anchors flat metadata removal to the proven inode.
+# Never recursively remove a pathname: a replacement release may appear there
+# after an identity check. rmdir can only remove an empty directory.
+begin_remove_directory() (
+    local path=$1 identity=$2 kind=$3 entry
+    cd -P -- "$path" || exit 1
+    begin_ancestors_match && begin_directory_matches . "$identity" || exit 1
+    shopt -s nullglob dotglob
+    local entries=(./*)
+    if [ "$kind" = candidate ]; then
+        [ "${#entries[@]}" -eq 0 ] || exit 1
+    else
+        if [ "$kind" = lock ]; then
+            [ -f ./owner ] && [ ! -L ./owner ] \
+                && printf '%s\n' "$release_id" | cmp -s -- ./owner - || exit 1
+        fi
+        for entry in "${entries[@]}"; do
+            [ -f "$entry" ] && [ ! -L "$entry" ] || exit 1
+        done
+        if [ "${#entries[@]}" -gt 0 ]; then rm -f -- "${entries[@]}" || exit 1; fi
+    fi
+    # A replaced name after the relative unlinks keeps its contents untouched.
+    begin_ancestors_match && begin_directory_matches "$path" "$identity" || exit 1
+    rmdir -- "$path"
+)
+
 cleanup_begin() {
     local status=$1 path identity name detached
     # A release directory may use the filesystem's whole 255-byte component.
@@ -710,28 +745,34 @@ cleanup_begin() {
     local candidate_detached="$releases/$prefix-candidate" transaction_detached="$state_root/$prefix-transaction" lock_detached="$control/$prefix-lock"
     [ "$status" -ne 0 ] || return 0
     echo '::error::Deployment initialization failed; checking owned initialization directories.' >&2
+    if [ -n "$begin_lock_source" ] && { [ -e "$begin_lock_source" ] || [ -L "$begin_lock_source" ]; }; then
+        if begin_ancestors_match && begin_directory_matches "$begin_lock_source" "$begin_lock_identity"; then
+            begin_remove_directory "$begin_lock_source" "$begin_lock_identity" lock || true
+        fi
+        return 0
+    fi
     begin_lock_matches || { echo '::warning::Initialization ownership is uncertain; lock and evidence retained.' >&2; return 0; }
     # mkdir can create a directory and still fail before returning success.
     # Without a captured inode, keep any existing path and the canonical lock.
     # If no directory exists, the failed creation needs nothing removed.
     if [ "$begin_transaction_created" = true ] && [ -z "$begin_transaction_identity" ]; then
-        if [ -e "$transaction" ] || [ -L "$transaction" ]; then return 0; fi
+        if [ -e "$begin_transaction_path" ] || [ -L "$begin_transaction_path" ]; then return 0; fi
         begin_transaction_created=false
     fi
     if [ "$begin_candidate_created" = true ] && [ -z "$begin_candidate_identity" ]; then
-        if [ -e "$candidate" ] || [ -L "$candidate" ]; then return 0; fi
+        if [ -e "$begin_candidate_path" ] || [ -L "$begin_candidate_path" ]; then return 0; fi
         begin_candidate_created=false
     fi
     if [ "$begin_transaction_created" = true ]; then
-        begin_directory_matches "$transaction" "$begin_transaction_identity" || return 0
+        begin_directory_matches "$begin_transaction_path" "$begin_transaction_identity" || return 0
     fi
     if [ "$begin_candidate_created" = true ]; then
-        begin_directory_matches "$candidate" "$begin_candidate_identity" || return 0
+        begin_directory_matches "$begin_candidate_path" "$begin_candidate_identity" || return 0
     fi
     for name in candidate transaction lock; do
         case $name in
-            candidate) [ "$begin_candidate_created" = true ] || continue; path=$candidate; identity=$begin_candidate_identity; detached=$candidate_detached ;;
-            transaction) [ "$begin_transaction_created" = true ] || continue; path=$transaction; identity=$begin_transaction_identity; detached=$transaction_detached ;;
+            candidate) [ "$begin_candidate_created" = true ] || continue; path=$begin_candidate_path; identity=$begin_candidate_identity; detached=$candidate_detached ;;
+            transaction) [ "$begin_transaction_created" = true ] || continue; path=$begin_transaction_path; identity=$begin_transaction_identity; detached=$transaction_detached ;;
             lock) path=$lock; identity=$begin_lock_identity; detached=$lock_detached ;;
         esac
         # Rename within each original parent, avoiding entries in a different
@@ -765,9 +806,9 @@ cleanup_begin() {
             mv -T -n -- "$lock_detached" "$lock" || true; return 0
         fi
     fi
-    if { [ "$begin_candidate_created" != true ] || rm -rf -- "$candidate_detached"; } \
-        && { [ "$begin_transaction_created" != true ] || rm -rf -- "$transaction_detached"; }; then
-        rm -rf -- "$lock_detached" || { mv -T -n -- "$lock_detached" "$lock" || true; return 0; }
+    if { [ "$begin_candidate_created" != true ] || begin_remove_directory "$candidate_detached" "$begin_candidate_identity" candidate; } \
+        && { [ "$begin_transaction_created" != true ] || begin_remove_directory "$transaction_detached" "$begin_transaction_identity" transaction; }; then
+        begin_remove_directory "$lock_detached" "$begin_lock_identity" lock || { mv -T -n -- "$lock_detached" "$lock" || true; return 0; }
         echo 'Released the failed initialization transaction and its owned lock.' >&2
     else
         mv -T -n -- "$lock_detached" "$lock" || true
@@ -812,22 +853,33 @@ begin() {
     begin_control_identity=$(stat -c '%d:%i' -- "$control")
     begin_releases_identity=$(stat -c '%d:%i' -- "$releases")
     begin_state_identity=$(stat -c '%d:%i' -- "$state_root")
-    local now acquired=false
+    local now evidence
     now=$(date +%s)
-    if mkdir "$lock" 2>/dev/null; then acquired=true; fi
-    [ "$acquired" = true ] || {
-        echo "::error::Another deployment owns $app_name's remote lock; automatic stale takeover is intentionally disabled." >&2
-        [ -f "$lock/owner" ] && echo "Lock owner: $(cat "$lock/owner")" >&2
-        echo "Verify that the owning run and all remote PHP processes have stopped before manually recovering this lock." >&2
-        exit 1
-    }
-    begin_lock_identity='' begin_transaction_identity='' begin_candidate_identity=''
+    for evidence in "$control"/.begin-cleanup-* "$releases"/.begin-cleanup-* "$state_root"/.begin-cleanup-*; do
+        if [ -e "$evidence" ] || [ -L "$evidence" ]; then
+            echo '::error::Uncertain initialization evidence requires deliberate recovery.' >&2
+            exit 1
+        fi
+    done
+    begin_lock_identity='' begin_lock_source='' begin_transaction_identity='' begin_candidate_identity=''
     begin_transaction_created=false begin_candidate_created=false
+    begin_transaction_path=$transaction begin_candidate_path=$candidate
     # Keep errexit active in the initialization body; a conditional function call
     # would suppress it inside write_value and could conceal failed writes.
     trap 'cleanup_begin "$?"' EXIT
-    begin_lock_identity=$(stat -c '%d:%i' -- "$lock")
-    printf '%s\n' "$release_id" >"$lock/owner"
+    # Prepare a randomized private directory and full exclusive owner before
+    # publishing it. The canonical path can never supply an adopted identity.
+    begin_lock_source=$(mktemp -d "$control/.begin-cleanup-acquire.XXXXXXXX")
+    begin_lock_identity=$(stat -c '%d:%i' -- "$begin_lock_source")
+    (set -C; printf '%s\n' "$release_id" >"$begin_lock_source/owner")
+    begin_ancestors_match && begin_directory_matches "$begin_lock_source" "$begin_lock_identity" \
+        && [ -f "$begin_lock_source/owner" ] && [ ! -L "$begin_lock_source/owner" ] \
+        && printf '%s\n' "$release_id" | cmp -s -- "$begin_lock_source/owner" - || exit 1
+    mv -T -n -- "$begin_lock_source" "$lock"
+    begin_lock_matches || {
+        echo "::error::Another deployment owns $app_name's remote lock or replaced its publication; automatic stale takeover is intentionally disabled." >&2
+        exit 1
+    }
     # Preserve evidence of every newer writer after its transaction is finalized.
     # Post-unlock diagnostics can then distinguish legitimate supersession from drift.
     local generation_temp='' generation_temp_identity=''
@@ -853,14 +905,27 @@ begin() {
         echo "::error::Release '$release_id' already exists; use a unique run attempt." >&2
         exit 1
     fi
+    # Capture each unique private source before exposing a canonical release
+    # name, so another writer's canonical directory cannot supply its identity.
+    begin_transaction_path="$state_root/${begin_lock_source##*/}-transaction"
     begin_transaction_created=true
-    mkdir -- "$transaction"
-    begin_transaction_identity=$(stat -c '%d:%i' -- "$transaction")
-    chmod 700 -- "$transaction"
+    mkdir -- "$begin_transaction_path"
+    begin_transaction_identity=$(stat -c '%d:%i' -- "$begin_transaction_path")
+    chmod 700 -- "$begin_transaction_path"
+    begin_lock_matches && begin_empty_directory "$begin_transaction_path" "$begin_transaction_identity" || exit 1
+    mv -T -n -- "$begin_transaction_path" "$transaction"
+    begin_directory_matches "$transaction" "$begin_transaction_identity"
+    begin_transaction_path=$transaction
+    begin_candidate_path="$releases/${begin_lock_source##*/}-candidate"
     begin_candidate_created=true
-    mkdir -- "$candidate"
-    begin_candidate_identity=$(stat -c '%d:%i' -- "$candidate")
-    chmod 755 -- "$candidate"
+    mkdir -- "$begin_candidate_path"
+    begin_candidate_identity=$(stat -c '%d:%i' -- "$begin_candidate_path")
+    chmod 755 -- "$begin_candidate_path"
+    begin_lock_matches && begin_empty_directory "$begin_candidate_path" "$begin_candidate_identity" || exit 1
+    mv -T -n -- "$begin_candidate_path" "$candidate"
+    begin_directory_matches "$candidate" "$begin_candidate_identity"
+    begin_candidate_path=$candidate
+    begin_lock_matches
     printf '%s\n' "$@" >"$transaction/persistent-paths"
     write_value commit "$commit"
     write_value retain "$retain"

@@ -57,13 +57,13 @@ inject_fault() {
 }
 matches_field() {
     case $1 in
-        "$HOME/.deployments/app/state/failed/$FAULT_FIELD"|"$HOME/.deployments/app/state/failed/.$FAULT_FIELD."*|"$HOME/.deployments/app/$FAULT_FIELD"|"$HOME/.deployments/app/.$FAULT_FIELD."*|"$HOME/.deployments/app/deploy.lock/$FAULT_FIELD") return 0 ;;
+        "$HOME/.deployments/app/state/failed/$FAULT_FIELD"|"$HOME/.deployments/app/state/failed/.$FAULT_FIELD."*|"$HOME/.deployments/app/$FAULT_FIELD"|"$HOME/.deployments/app/.$FAULT_FIELD."*|"$HOME/.deployments/app/deploy.lock/$FAULT_FIELD"|"$HOME/.deployments/app/.begin-cleanup-acquire."*"/$FAULT_FIELD") return 0 ;;
         *) return 1 ;;
     esac
 }
 printf() {
-    local target
-    target=$(readlink "/proc/$$/fd/1" || true)
+    local target process_id=$BASHPID
+    target=$(readlink "/proc/$process_id/fd/1" || true)
     if [ "$FAULT_COMMAND" = printf ] && matches_field "$target"; then inject_fault; return 91; fi
     builtin printf "$@"
 }
@@ -72,11 +72,60 @@ mktemp() {
     if [ "$FAULT_COMMAND" = mktemp ] && matches_field "${!#}"; then inject_fault; return 91; fi
     "$REAL_MKTEMP" "$@"
 }
+stat() {
+    if [ "$FAULT_COMMAND" = lock-stat ] && [ "${!#}" = "$HOME/.deployments/app/deploy.lock" ] && [ ! -f "$FIXTURE_ROOT/hit" ]; then
+        builtin printf 'hit\n' >"$FIXTURE_ROOT/hit"
+        command mv "$HOME/.deployments/app/deploy.lock" "$FIXTURE_ROOT/original-acquired-lock"
+        command mkdir "$HOME/.deployments/app/deploy.lock"
+        builtin printf 'replacement\n' >"$HOME/.deployments/app/deploy.lock/owner"
+    fi
+    if [ "$FAULT_COMMAND" = directory-stat ] && [ ! -f "$FIXTURE_ROOT/hit" ]; then
+        local target
+        case $FAULT_FIELD in
+            candidate) target="$HOME/.deployments/app/releases/failed" ;;
+            transaction) target="$HOME/.deployments/app/state/failed" ;;
+        esac
+        if [ "${!#}" = "$target" ]; then
+            builtin printf 'hit\n' >"$FIXTURE_ROOT/hit"
+            command mv "$target" "$FIXTURE_ROOT/original-published"
+            command mkdir "$target"
+            builtin printf 'foreign payload\n' >"$target/foreign"
+        fi
+    fi
+    command stat "$@"
+}
+swap_cleanup() {
+    local target=$1 boundary=$2
+    touch "$FIXTURE_ROOT/removal-hit"
+    command mv "$target" "$FIXTURE_ROOT/original-removal"
+    command mkdir "$target"
+    builtin printf 'foreign payload\n' >"$target/foreign"
+    [ "$boundary" != lock ] || builtin printf 'replacement\n' >"$target/owner"
+}
+rm() {
+    case ${REPLACE:-none}:$PWD in
+        rm-transaction:*/.begin-cleanup-*-transaction|rm-lock:*/.begin-cleanup-*-lock)
+            if [ ! -f "$FIXTURE_ROOT/removal-hit" ]; then swap_cleanup "$PWD" "${REPLACE#rm-}"; fi ;;
+    esac
+    command rm "$@"
+}
+rmdir() {
+    case ${REPLACE:-none}:${!#} in
+        rmdir-candidate:*/.begin-cleanup-*-candidate|rmdir-transaction:*/.begin-cleanup-*-transaction|rmdir-lock:*/.begin-cleanup-*-lock)
+            if [ ! -f "$FIXTURE_ROOT/removal-hit" ]; then swap_cleanup "${!#}" "${REPLACE#rmdir-}"; fi ;;
+    esac
+    command rmdir "$@"
+}
 chmod() {
     local target=${!#}
+    if [ "$FAULT_COMMAND" = prepublish-lock ]; then
+        case "$FAULT_FIELD:$target" in
+            transaction:"$HOME/.deployments/app/state/.begin-cleanup-acquire."*-transaction|candidate:"$HOME/.deployments/app/releases/.begin-cleanup-acquire."*-candidate) inject_fault || true ;;
+        esac
+    fi
     if [ "$FAULT_COMMAND" = chmod ]; then
         case "$FAULT_FIELD:$target" in
-            transaction:"$HOME/.deployments/app/state/failed"|candidate:"$HOME/.deployments/app/releases/failed") inject_fault; return 91 ;;
+            transaction:"$HOME/.deployments/app/state/.begin-cleanup-acquire."*-transaction|candidate:"$HOME/.deployments/app/releases/.begin-cleanup-acquire."*-candidate) inject_fault; return 91 ;;
         esac
     fi
     command chmod "$@"
@@ -85,7 +134,7 @@ mkdir() {
     local target=${!#}
     if [ "$FAULT_COMMAND" = mkdir-after ]; then
         case "$FAULT_FIELD:$target" in
-            transaction:"$HOME/.deployments/app/state/failed"|candidate:"$HOME/.deployments/app/releases/failed") command mkdir "$@"; inject_fault; return 91 ;;
+            transaction:"$HOME/.deployments/app/state/.begin-cleanup-acquire."*-transaction|candidate:"$HOME/.deployments/app/releases/.begin-cleanup-acquire."*-candidate) command mkdir "$@"; inject_fault; return 91 ;;
         esac
     fi
     command mkdir "$@"
@@ -218,8 +267,13 @@ for field in transaction candidate; do
     export FAULT_COMMAND=mkdir-after FAULT_FIELD="$field" REPLACE=none
     run_fault
     test -d "$HOME/.deployments/app/deploy.lock"
-    test -d "$HOME/.deployments/app/state/failed"
-    if [ "$field" = candidate ]; then test -d "$HOME/.deployments/app/releases/failed"; fi
+    if [ "$field" = transaction ]; then
+        partial_sources=("$HOME/.deployments/app/state"/.begin-cleanup-acquire.*-transaction)
+    else
+        test -d "$HOME/.deployments/app/state/failed"
+        partial_sources=("$HOME/.deployments/app/releases"/.begin-cleanup-acquire.*-candidate)
+    fi
+    test -d "${partial_sources[0]}"
     if bash "$here/atomic-release.sh" begin app retry "$commit" 7200 3 maintenance "$commit" stable-directory storage >/dev/null 2>&1; then exit 1; fi
     checks=$((checks + 1))
     setup
@@ -258,14 +312,59 @@ for replacement in control releases state; do
     [ "$replacement" = control ] || test -d "$HOME/.deployments/app/deploy.lock"
     checks=$((checks + 1))
 done
-# The first owner write can leave an empty owner record. An uncertain lock is
-# retained rather than claiming an identity which was never durably recorded.
+# The first owner write can leave an empty private owner record. Preserve
+# hidden evidence and refuse another begin until deliberate recovery.
 setup
 export FAULT_COMMAND=printf FAULT_FIELD=owner REPLACE=none
 run_fault
-test -d "$HOME/.deployments/app/deploy.lock"
-test ! -s "$HOME/.deployments/app/deploy.lock/owner"
+test ! -e "$HOME/.deployments/app/deploy.lock"
+private_sources=("$HOME/.deployments/app"/.begin-cleanup-acquire.*)
+test -d "${private_sources[0]}"
+test ! -s "${private_sources[0]}/owner"
+if bash "$here/atomic-release.sh" begin app retry "$commit" 7200 3 maintenance "$commit" stable-directory storage >/dev/null 2>&1; then exit 1; fi
 checks=$((checks + 1))
+# Replace the canonical lock exactly as its identity is first checked. The
+# prepared source identity must not adopt or overwrite the replacement owner.
+setup
+export FAULT_COMMAND=lock-stat FAULT_FIELD=none REPLACE=none
+run_fault
+test "$(cat "$HOME/.deployments/app/deploy.lock/owner")" = replacement
+checks=$((checks + 1))
+for field in transaction candidate; do
+    setup
+    export FAULT_COMMAND=directory-stat FAULT_FIELD="$field" REPLACE=none
+    run_fault
+    test -d "$HOME/.deployments/app/deploy.lock"
+    case $field in
+        transaction) test -f "$HOME/.deployments/app/state/failed/foreign" ;;
+        candidate) test -f "$HOME/.deployments/app/releases/failed/foreign" ;;
+    esac
+    checks=$((checks + 1))
+done
+for field in transaction candidate; do
+    setup
+    export FAULT_COMMAND=prepublish-lock FAULT_FIELD="$field" REPLACE=lock
+    run_fault
+    test "$(cat "$HOME/.deployments/app/deploy.lock/owner")" = replacement
+    case $field in
+        transaction) test ! -e "$HOME/.deployments/app/state/failed" ;;
+        candidate) test ! -e "$HOME/.deployments/app/releases/failed" ;;
+    esac
+    checks=$((checks + 1))
+done
+# Replace each detached path as the deletion command itself starts. Flat
+# metadata removals stay inside the held original cwd; rmdir never erases data.
+for replacement in rmdir-candidate rm-transaction rmdir-transaction rm-lock rmdir-lock; do
+    setup
+    export FAULT_COMMAND=mv FAULT_FIELD=phase REPLACE="$replacement"
+    run_fault
+    test -f "$fixture/removal-hit"
+    test "$(find "$HOME/.deployments/app" -name foreign -type f | wc -l)" -eq 1
+    test -d "$HOME/.deployments/app/deploy.lock"
+    if [[ $replacement == *-lock ]]; then test "$(cat "$HOME/.deployments/app/deploy.lock/owner")" = replacement; fi
+    if bash "$here/atomic-release.sh" begin app retry "$commit" 7200 3 maintenance "$commit" stable-directory storage >/dev/null 2>&1; then exit 1; fi
+    checks=$((checks + 1))
+done
 for length in 235 255; do
     setup
     long_release=$(printf '%*s' "$length" '' | tr ' ' a)
