@@ -1108,6 +1108,34 @@ serve() {
     echo "Release $release_id is selected and serving; live verification may begin."
 }
 
+# Record that the selected candidate served and passed the site's own health
+# check. Under failure-policy maintenance, a later read-only verification
+# failure then leaves it serving rather than taking a healthy site down.
+mark_healthy() {
+    if [ "$#" -ne 0 ]; then
+        echo "usage: ... mark-healthy <app> <release>" >&2
+        exit 2
+    fi
+    require_owner
+    [ "$(cat "$transaction/activated")" = true ] || { echo "::error::Candidate is not selected." >&2; exit 1; }
+    read_value phase
+    [ "$REPLY" = serving ] || { echo "::error::Only a serving candidate can be marked healthy." >&2; exit 1; }
+    write_value served_healthy true
+    echo "Release $release_id served and passed its health check."
+}
+
+# Withdraw the healthy mark: the web handler answered with the wrong runtime,
+# which is a definitive failure, not a flaky one, so failure-policy applies.
+unmark_healthy() {
+    if [ "$#" -ne 0 ]; then
+        echo "usage: ... unmark-healthy <app> <release>" >&2
+        exit 2
+    fi
+    require_owner
+    write_value served_healthy false
+    echo "Release $release_id is no longer marked healthy; failure-policy applies."
+}
+
 commit_release() {
     if [ "$#" -lt 1 ] || [ "$#" -gt 2 ]; then
         echo "usage: ... commit <app> <release> <php> [memory-limit]" >&2
@@ -1281,7 +1309,7 @@ finalize() {
         echo "usage: ... finalize <app> <release> <php> [memory-limit]" >&2
         exit 2
     fi
-    local php=$1 memory=${2:-} committed=false risk_started=false recovery_required=false policy=maintenance previous=none current current_root recovery_status=0 conversion_target='' conversion_release='' conversion_commit='' layout=release-symlink live_root phase=''
+    local php=$1 memory=${2:-} committed=false risk_started=false recovery_required=false policy=maintenance previous=none current current_root recovery_status=0 conversion_target='' conversion_release='' conversion_commit='' layout=release-symlink live_root phase='' served_healthy=false left_serving=false
     validate_memory_limit "$memory"
     if [ ! -d "$transaction" ]; then
         if [ -f "$lock/owner" ] && [ "$(cat "$lock/owner")" = "$release_id" ]; then release_lock || true; fi
@@ -1300,8 +1328,32 @@ finalize() {
     read_value previous_target && previous=$REPLY
     transaction_layout && layout=$REPLY
     read_value phase && phase=$REPLY
+    read_value served_healthy && served_healthy=$REPLY
+    read_value left_serving && left_serving=$REPLY
 
-    if [ "$committed" = true ]; then
+    # A candidate that already served and passed the health check is left
+    # serving when a later read-only check fails (a flaky probe took a healthy
+    # site down on 2026-10-05). Maintenance is for failures that can leave the
+    # schema and code disagreeing; this is not one. Rollback keeps its meaning.
+    #
+    # The decision is durable (left_serving) before anything else is written, so
+    # a finalizer retried after phase=finalized, or after a failed cleanup that
+    # kept the lock, still recognizes it instead of taking the release down.
+    if [ "$committed" != true ] && [ "$risk_started" = true ] && [ "$policy" = maintenance ] \
+        && { { [ "$served_healthy" = true ] && [ "$phase" = serving ]; } || [ "$left_serving" = true ]; }; then
+        live_root=$(selected_candidate_root || true)
+        if [ -n "$live_root" ] && require_serving "$php" "$live_root" "$memory" >/dev/null 2>&1; then
+            write_value left_serving true
+            echo "::error::Deployment failed after release $release_id was serving and healthy; it was left serving and was not committed. Investigate the failing check."
+            committed=left-serving
+        else
+            echo "::warning::The healthy-marked candidate no longer proves serving; applying failure-policy maintenance." >&2
+        fi
+    fi
+
+    if [ "$committed" = left-serving ]; then
+        :
+    elif [ "$committed" = true ]; then
         live_root=$(selected_candidate_root || true)
         [ -n "$live_root" ] || recovery_status=1
         if [ "$recovery_status" -eq 0 ]; then require_serving "$php" "$live_root" "$memory" || recovery_status=1; fi
@@ -1466,6 +1518,8 @@ case $command in
     refresh-caches) refresh_caches "$@" ;;
     serve) serve "$@" ;;
     restore-cron) restore_cron_command "$@" ;;
+    mark-healthy) mark_healthy "$@" ;;
+    unmark-healthy) unmark_healthy "$@" ;;
     commit) commit_release "$@" ;;
     finalize) finalize "$@" ;;
     status) [ "$#" -le 2 ] || exit 2; report_status "${1:-}" "${2:-}" ;;

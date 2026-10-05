@@ -14,6 +14,10 @@
 #
 # Fails the deploy when the web handler runs a different PHP major.minor than <php-version>, or a
 # `memory_limit` below <min-memory-limit> (for example 1024M; -1, unlimited, satisfies any minimum).
+#
+# Exit status: 0 verified; 1 inconclusive (no well-formed answer within the window); 2 usage;
+# 3 definitive (the handler answered, and its runtime is wrong). A deploy may keep a healthy
+# release serving through an inconclusive probe, never through a definitive one.
 set -euo pipefail
 
 if [ "$#" -lt 5 ]; then
@@ -54,6 +58,10 @@ if [ -z "$minimum" ] || [ "$minimum" = -1 ]; then
     exit 2
 fi
 
+# The probe's overall retry window in seconds; see the retry loop below.
+window=${WEB_PHP_PROBE_WINDOW:-75}
+[[ $window =~ ^[0-9]+$ ]] || { echo "::error::WEB_PHP_PROBE_WINDOW must be whole seconds." >&2; exit 2; }
+
 name="_deploy-php-check-$(openssl rand -hex 16).php"
 remote="$app_dir/public/$name"
 
@@ -80,10 +88,23 @@ PHP
 # A proxy or newly reloaded web handler can return an HTML page with HTTP 200. curl's HTTP
 # retries do not catch that. Retry missing/malformed responses, but a real runtime that does
 # not meet the application's requirements must fail immediately below.
+#
+# The window is about a minute, with backoff: on LiteSpeed the request that follows a change
+# under public/ (a rewritten .htaccess handler, a swapped stable directory) has been answered
+# with an HTML 200 for several seconds, which three tries two seconds apart did not outlast.
 response_file=$(mktemp)
 runtime_pattern='^[0-9]+\.[0-9]+\|(-1|[0-9]+[KkMmGg]?)\|[A-Za-z0-9_-]+$'
-for attempt in 1 2 3; do
-    if response_meta=$(curl --fail --silent --show-error --max-time 20 \
+delays=(2 3 5 8 10 12 15)
+attempts=$(( ${#delays[@]} + 1 ))
+# One deadline for the whole window, not just the sleeps: a host that accepts and then stalls
+# would otherwise spend curl's full per-request limit on every attempt (about 3.5 minutes,
+# holding the deploy lock). WEB_PHP_PROBE_WINDOW exists for tests.
+deadline=$(( SECONDS + window ))
+for (( attempt = 1; attempt <= attempts; attempt++ )); do
+    request_limit=$(( deadline - SECONDS ))
+    (( request_limit <= 20 )) || request_limit=20
+    (( request_limit >= 5 )) || request_limit=5
+    if response_meta=$(curl --fail --silent --show-error --max-time "$request_limit" \
         --header 'Cache-Control: no-cache' --output "$response_file" \
         --write-out '%{http_code}|%{content_type}' "$site_url/$name"); then
         answer=$(<"$response_file")
@@ -95,16 +116,28 @@ for attempt in 1 2 3; do
         reason='could not fetch the PHP runtime fields'
     fi
     IFS='|' read -r http_status content_type <<<"$response_meta"
-    # Never print the body: an intermediary/error page might contain unrelated sensitive data.
-    # Ignore arbitrary response header text as well; display only a recognizable MIME type.
+    # Never print the body, or even an HTML page's title: an intermediary or error page can put
+    # user data or a token anywhere in it. Report a recognizable MIME type and, for an HTML page,
+    # only a short SHA-256 of its <title>, which tells whether repeat failures come from the same
+    # page without revealing what it says. Truncation happens in the shell: head closing the
+    # pipe early would SIGPIPE sed on a long title and, under pipefail, end the probe.
     content_type=${content_type%%;*}
     [[ $content_type =~ ^[A-Za-z0-9.+-]+/[A-Za-z0-9.+-]+$ ]] || content_type=unknown
-    if [ "$attempt" -eq 3 ]; then
-        echo "::error::The web PHP probe $reason after 3 attempts (HTTP $http_status, content-type $content_type). Check the site's document root, rewrite rules, and proxy/WAF routing; this response does not establish a PHP version." >&2
+    title=$(tr '\n\r' '  ' <"$response_file" 2>/dev/null | sed -n 's/.*<[Tt][Ii][Tt][Ll][Ee][^>]*>\([^<]*\)<.*/\1/p') || title=''
+    title_hash=''
+    if [ -n "$title" ]; then
+        title_hash=$(printf '%s' "$title" | openssl dgst -sha256 -r 2>/dev/null) || title_hash=''
+        title_hash=${title_hash:0:12}
+        [[ $title_hash =~ ^[0-9a-f]{12}$ ]] || title_hash=''
+    fi
+    detail="HTTP $http_status, content-type $content_type${title_hash:+, title sha256 $title_hash}"
+    pause=${delays[attempt-1]:-0}
+    if [ "$attempt" -eq "$attempts" ] || (( SECONDS + pause + 5 > deadline )); then
+        echo "::error::The web PHP probe $reason after $attempt attempts in $(( window - (deadline - SECONDS) ))s ($detail). Check the site's document root, rewrite rules, and proxy/WAF routing; this response does not establish a PHP version." >&2
         exit 1
     fi
-    echo "::warning::The web PHP probe $reason (HTTP $http_status, content-type $content_type); retrying ($attempt/3)." >&2
-    sleep 2
+    echo "::warning::The web PHP probe $reason ($detail); retrying in ${pause}s ($attempt/$attempts)." >&2
+    sleep "$pause"
 done
 IFS='|' read -r php memory sapi <<<"$answer"
 
@@ -112,17 +145,17 @@ echo "Web handler: PHP $php, memory_limit=$memory, SAPI $sapi."
 
 if [ "$php" != "$want_php" ]; then
     echo "::error::The web handler runs PHP '$php', not $want_php. Check the cPanel handler block appended to public/.htaccess." >&2
-    exit 1
+    exit 3
 fi
 
 actual=$(to_bytes "$memory")
 if [ -z "$actual" ]; then
     echo "::error::The web handler reported an unreadable memory_limit '$memory'." >&2
-    exit 1
+    exit 3
 fi
 
 if [ "$actual" != -1 ] && [ "$actual" -lt "$minimum" ]; then
     echo "::error::The web handler's memory_limit is $memory, below the required $want_memory. On LiteSpeed set" \
          "'php_value memory_limit $want_memory' inside '<IfModule LiteSpeed>' in public/.htaccess; .user.ini is ignored there." >&2
-    exit 1
+    exit 3
 fi

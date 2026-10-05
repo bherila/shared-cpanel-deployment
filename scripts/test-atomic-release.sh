@@ -403,6 +403,54 @@ check "post-activation failure leaves candidate selected" test "$(status_field l
 check "post-activation failure puts candidate in maintenance" test "$(status_field live-check-failure live_state)" = maintenance
 check "post-activation failure re-pauses restored application cron" test ! -s "$CRONTAB_FILE"
 
+# Once the selected candidate served and passed the site health check, a later
+# read-only verification failure (a flaky web PHP probe took a healthy site down
+# on 2026-10-05) leaves it serving, uncommitted, with its cron, and finalizes.
+setup; make_legacy; begin_and_upload served-healthy; preflight_quiesce served-healthy; bash "$script" prepare app served-healthy "$php" >/dev/null
+bash "$script" risk app served-healthy "$php" >/dev/null; bash "$script" activate app served-healthy "$php" >/dev/null
+bash "$script" mark-healthy app served-healthy >/dev/null 2>&1
+check "mark-healthy refuses a candidate that is not serving yet" test "$?" -ne 0
+bash "$script" serve app served-healthy "$php" >/dev/null; bash "$script" restore-cron app served-healthy >/dev/null
+bash "$script" mark-healthy app served-healthy >/dev/null
+finalize_output=$(bash "$script" finalize app served-healthy "$php" 2>&1); finalize_status=$?
+check "a healthy served failure finalizes cleanly" test "$finalize_status" -eq 0
+check "a healthy served failure says it was left serving" grep -Fq 'was left serving and was not committed' <<<"$finalize_output"
+check "a healthy served failure keeps the candidate selected" test "$(status_field served-healthy live_release)" = served-healthy
+check "a healthy served failure keeps the candidate serving" test "$(status_field served-healthy live_state)" = serving
+check "a healthy served failure keeps application cron" grep -Fq '# JOB:app-scheduler' "$CRONTAB_FILE"
+check "a healthy served failure releases the deploy lock" test ! -e "$HOME/.deployments/app/deploy.lock/owner"
+
+# The left-serving decision survives a finalizer that died after recording it:
+# a retry with phase already finalized and the lock still held keeps serving.
+setup; make_legacy; begin_and_upload left-serving-retry; preflight_quiesce left-serving-retry; bash "$script" prepare app left-serving-retry "$php" >/dev/null
+bash "$script" risk app left-serving-retry "$php" >/dev/null; bash "$script" activate app left-serving-retry "$php" >/dev/null
+bash "$script" serve app left-serving-retry "$php" >/dev/null; bash "$script" restore-cron app left-serving-retry >/dev/null
+bash "$script" mark-healthy app left-serving-retry >/dev/null
+printf 'true\n' >"$HOME/.deployments/app/state/left-serving-retry/left_serving"
+printf 'finalized\n' >"$HOME/.deployments/app/state/left-serving-retry/phase"
+bash "$script" finalize app left-serving-retry "$php" >/dev/null 2>&1
+check "a retried finalizer honours the recorded left-serving decision" test "$(status_field left-serving-retry live_state)" = serving
+check "a retried finalizer keeps application cron" grep -Fq '# JOB:app-scheduler' "$CRONTAB_FILE"
+
+# The mark is not a pass: a candidate that went down after it was marked healthy
+# still gets failure-policy maintenance.
+setup; make_legacy; begin_and_upload marked-then-down; preflight_quiesce marked-then-down; bash "$script" prepare app marked-then-down "$php" >/dev/null
+bash "$script" risk app marked-then-down "$php" >/dev/null; bash "$script" activate app marked-then-down "$php" >/dev/null
+bash "$script" serve app marked-then-down "$php" >/dev/null; bash "$script" restore-cron app marked-then-down >/dev/null
+bash "$script" mark-healthy app marked-then-down >/dev/null; (cd "$candidate" && "$php" artisan down --no-ansi)
+bash "$script" finalize app marked-then-down "$php" >/dev/null 2>&1
+check "a marked candidate that went down returns to maintenance" test "$(status_field marked-then-down live_state)" = maintenance
+check "a marked candidate that went down has cron paused" test ! -s "$CRONTAB_FILE"
+
+# A definitive runtime mismatch withdraws the mark: maintenance applies as before.
+setup; make_legacy; begin_and_upload wrong-runtime; preflight_quiesce wrong-runtime; bash "$script" prepare app wrong-runtime "$php" >/dev/null
+bash "$script" risk app wrong-runtime "$php" >/dev/null; bash "$script" activate app wrong-runtime "$php" >/dev/null
+bash "$script" serve app wrong-runtime "$php" >/dev/null; bash "$script" restore-cron app wrong-runtime >/dev/null
+bash "$script" mark-healthy app wrong-runtime >/dev/null; bash "$script" unmark-healthy app wrong-runtime >/dev/null
+bash "$script" finalize app wrong-runtime "$php" >/dev/null 2>&1
+check "an unmarked candidate with a wrong runtime returns to maintenance" test "$(status_field wrong-runtime live_state)" = maintenance
+check "an unmarked candidate with a wrong runtime has cron paused" test ! -s "$CRONTAB_FILE"
+
 # The cPanel-compatible layout keeps the vhost application path real. Its two
 # activation renames are durably recoverable, and v2.0 symlink deployments can
 # migrate without changing the selected code or persistent state.
