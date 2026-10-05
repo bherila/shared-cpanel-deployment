@@ -54,10 +54,17 @@ run_case() {
     local status=0
     bash "$here/verify-web-php.sh" fake-host app https://example.invalid 8.5 1024M \
         >"$probe_fixture/log" 2>&1 || status=$?
-    if [ "$status" -ne "$expected_status" ] || [ "$(<"$probe_fixture/count")" -ne "$expected_requests" ]; then
-        printf 'FAIL - %s (status %s, requests %s)\n' "$label" "$status" "$(<"$probe_fixture/count")"
+    local requests=0
+    [ ! -f "$probe_fixture/count" ] || requests=$(<"$probe_fixture/count")
+    if [ "$status" -ne "$expected_status" ] || [ "$requests" -ne "$expected_requests" ]; then
+        printf 'FAIL - %s (status %s, requests %s)\n' "$label" "$status" "$requests"
         cat "$probe_fixture/log"
         exit 1
+    fi
+    if [ "$expected_requests" -eq 0 ]; then
+        [ ! -e "$probe_fixture/remote-probe" ]
+        printf 'ok - %s; nothing was written to the host\n' "$label"
+        return
     fi
     [ -f "$probe_fixture/cleaned" ] && [ ! -e "$probe_fixture/remote-probe" ]
     [ ! -e "$(<"$probe_fixture/response-path")" ]
@@ -76,7 +83,7 @@ run_case 'transport failure retries and recovers' 0 2 transport '8.5|-1|fpm-fcgi
 run_case 'HTML for five attempts still recovers' 0 6 html html html html html '8.5|1024M|litespeed'
 run_case 'persistent HTML fails after eight attempts' 1 8 html html html html html html html html
 grep -q 'HTTP 200, content-type text/html' "$probe_fixture/log"
-grep -q 'after 8 attempts' "$probe_fixture/log"
+grep -q 'after 8 attempts in ' "$probe_fixture/log"
 grep -q 'does not establish a PHP version' "$probe_fixture/log"
 run_case 'an HTML title is reported in plain words only' 1 8 titled titled titled titled titled titled titled titled
 grep -q 'title "Service Unavailable  8.5' "$probe_fixture/log"
@@ -84,6 +91,10 @@ if grep -q '"Unavailable"\|</\?title' "$probe_fixture/log"; then
     echo 'FAIL - an HTML title was reported with markup or quotes'
     exit 1
 fi
+# The whole window is bounded, not just its sleeps: with no time left, no further attempt starts.
+WEB_PHP_PROBE_WINDOW=0 run_case 'an exhausted window stops retrying' 1 1 html html '8.5|1024M|litespeed'
+grep -q 'after 1 attempts in 0s' "$probe_fixture/log"
+WEB_PHP_PROBE_WINDOW=soon run_case 'a malformed window is refused' 2 0 '8.5|1024M|litespeed'
 run_case 'a title longer than a pipe buffer keeps retrying' 0 3 longtitle longtitle '8.5|1024M|litespeed'
 run_case 'well-formed wrong PHP fails immediately' 1 1 '8.4|1024M|litespeed' '8.5|1024M|litespeed'
 run_case 'insufficient memory fails immediately' 1 1 '8.5|128M|litespeed' '8.5|1024M|litespeed'

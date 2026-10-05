@@ -54,6 +54,10 @@ if [ -z "$minimum" ] || [ "$minimum" = -1 ]; then
     exit 2
 fi
 
+# The probe's overall retry window in seconds; see the retry loop below.
+window=${WEB_PHP_PROBE_WINDOW:-75}
+[[ $window =~ ^[0-9]+$ ]] || { echo "::error::WEB_PHP_PROBE_WINDOW must be whole seconds." >&2; exit 2; }
+
 name="_deploy-php-check-$(openssl rand -hex 16).php"
 remote="$app_dir/public/$name"
 
@@ -88,8 +92,15 @@ response_file=$(mktemp)
 runtime_pattern='^[0-9]+\.[0-9]+\|(-1|[0-9]+[KkMmGg]?)\|[A-Za-z0-9_-]+$'
 delays=(2 3 5 8 10 12 15)
 attempts=$(( ${#delays[@]} + 1 ))
+# One deadline for the whole window, not just the sleeps: a host that accepts and then stalls
+# would otherwise spend curl's full per-request limit on every attempt (about 3.5 minutes,
+# holding the deploy lock). WEB_PHP_PROBE_WINDOW exists for tests.
+deadline=$(( SECONDS + window ))
 for (( attempt = 1; attempt <= attempts; attempt++ )); do
-    if response_meta=$(curl --fail --silent --show-error --max-time 20 \
+    request_limit=$(( deadline - SECONDS ))
+    (( request_limit <= 20 )) || request_limit=20
+    (( request_limit >= 5 )) || request_limit=5
+    if response_meta=$(curl --fail --silent --show-error --max-time "$request_limit" \
         --header 'Cache-Control: no-cache' --output "$response_file" \
         --write-out '%{http_code}|%{content_type}' "$site_url/$name"); then
         answer=$(<"$response_file")
@@ -111,12 +122,13 @@ for (( attempt = 1; attempt <= attempts; attempt++ )); do
     title=$(tr '\n\r' '  ' <"$response_file" 2>/dev/null | sed -n 's/.*<[Tt][Ii][Tt][Ll][Ee][^>]*>\([^<]*\)<.*/\1/p' | tr -cd 'A-Za-z0-9 .,:()-') || title=''
     title=${title:0:80}
     detail="HTTP $http_status, content-type $content_type${title:+, title \"$title\"}"
-    if [ "$attempt" -eq "$attempts" ]; then
-        echo "::error::The web PHP probe $reason after $attempts attempts ($detail). Check the site's document root, rewrite rules, and proxy/WAF routing; this response does not establish a PHP version." >&2
+    pause=${delays[attempt-1]:-0}
+    if [ "$attempt" -eq "$attempts" ] || (( SECONDS + pause + 5 > deadline )); then
+        echo "::error::The web PHP probe $reason after $attempt attempts in $(( window - (deadline - SECONDS) ))s ($detail). Check the site's document root, rewrite rules, and proxy/WAF routing; this response does not establish a PHP version." >&2
         exit 1
     fi
-    echo "::warning::The web PHP probe $reason ($detail); retrying in ${delays[attempt-1]}s ($attempt/$attempts)." >&2
-    sleep "${delays[attempt-1]}"
+    echo "::warning::The web PHP probe $reason ($detail); retrying in ${pause}s ($attempt/$attempts)." >&2
+    sleep "$pause"
 done
 IFS='|' read -r php memory sapi <<<"$answer"
 
