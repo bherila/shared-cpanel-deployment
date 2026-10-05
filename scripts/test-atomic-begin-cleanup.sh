@@ -223,4 +223,25 @@ run_fault
 test -d "$HOME/.deployments/app/deploy.lock"
 test ! -s "$HOME/.deployments/app/deploy.lock/owner"
 checks=$((checks + 1))
+for length in 235 255; do
+    setup
+    long_release=$(printf '%*s' "$length" '' | tr ' ' a)
+    cat >"$fixture/long-inject.sh" <<'SH'
+mktemp() {
+    case ${!#} in
+        */.phase.*) printf 'hit\n' >"$FIXTURE_ROOT/hit"; return 91 ;;
+    esac
+    "$REAL_MKTEMP" "$@"
+}
+SH
+    if BASH_ENV="$fixture/long-inject.sh" bash "$here/atomic-release.sh" begin app "$long_release" "$commit" 7200 3 maintenance "$commit" stable-directory storage >"$fixture/output" 2>&1; then exit 1; fi
+    test -f "$fixture/hit"
+    test ! -e "$HOME/.deployments/app/deploy.lock"
+    test ! -e "$HOME/.deployments/app/state/$long_release"
+    test ! -e "$HOME/.deployments/app/releases/$long_release"
+    test "$(cat "$HOME/app/storage/preserved")" = 'patient data'
+    test "$(cat "$fixture/crontab")" = 'foreign cron'
+    bash "$here/atomic-release.sh" begin app retry "$commit" 7200 3 maintenance "$commit" stable-directory storage >/dev/null
+    checks=$((checks + 1))
+done
 echo "ok - $checks initialization fault/ownership cases; later acquisition and app preservation proven"

@@ -704,7 +704,9 @@ begin_lock_matches() {
 
 cleanup_begin() {
     local status=$1 path identity name detached
-    local prefix="$control/.begin-cleanup-${release_id}-$$"
+    # A release directory may use the filesystem's whole 255-byte component.
+    # Device/inode numbers and PID keep detach names bounded independently.
+    local prefix="$control/.begin-cleanup-${begin_lock_identity//:/-}-$$"
     [ "$status" -ne 0 ] || return 0
     echo '::error::Deployment initialization failed; checking owned initialization directories.' >&2
     begin_lock_matches || { echo '::warning::Initialization ownership is uncertain; lock and evidence retained.' >&2; return 0; }
