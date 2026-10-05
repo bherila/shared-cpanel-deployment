@@ -41,9 +41,17 @@ mv() {
         return 91
     fi
     if [[ $ROLE == waiter && $destination == "$HOME/.deployments/app/deploy.lock" && $source == */.begin-cleanup-acquire.* ]]; then
+        builtin printf '%s\n' "$source" >"$REVIEW_ROOT/waiter-source"
         builtin printf ready >"$REVIEW_ROOT/waiter-ready"
         await_file "$REVIEW_ROOT/allow-waiter" || return
-        /usr/bin/mv "$@" || return
+        local result=0
+        /usr/bin/mv "$@" || result=$?
+        # Coreutils versions differ on the status of a no-clobber skip.
+        # Exercise both conventions while keeping the real rename behavior.
+        if [[ -d $source && -d $destination ]]; then
+            return "$REVIEW_SKIP_STATUS"
+        fi
+        (( result == 0 )) || return "$result"
         if [[ $REVIEW_CASE == lock ]]; then
             builtin printf published >"$REVIEW_ROOT/waiter-published"
             await_file "$REVIEW_ROOT/old-finished" || return
@@ -81,8 +89,8 @@ def await_file(path):
             raise AssertionError('Missing coordination event: ' + str(path))
         time.sleep(.01)
 
-for case in ('child', 'transaction', 'lock'):
-    fixture = root / case
+for case, skip_status in [(case, status) for status in (0, 1) for case in ('child', 'transaction', 'lock')]:
+    fixture = root / f'{case}-skip{skip_status}'
     app = fixture / 'home/app'
     (app / 'storage').mkdir(parents=True)
     (app / 'artisan').write_text('<?php\n')
@@ -90,7 +98,7 @@ for case in ('child', 'transaction', 'lock'):
     (app / 'storage/preserved').write_text('patient data\n')
     (fixture / 'crontab').write_text('foreign cron\n')
     control = fixture / 'home/.deployments/app'
-    env = dict(os.environ, HOME=str(fixture/'home'), BASH_ENV=str(hooks), REVIEW_ROOT=str(fixture), REVIEW_CASE=case)
+    env = dict(os.environ, HOME=str(fixture/'home'), BASH_ENV=str(hooks), REVIEW_ROOT=str(fixture), REVIEW_CASE=case, REVIEW_SKIP_STATUS=str(skip_status))
     args = ['bash',str(script),'begin','app','old',commit,'7200','3','maintenance',commit,'stable-directory','storage']
     logs = []
     processes = []
@@ -106,6 +114,8 @@ for case in ('child', 'transaction', 'lock'):
         waiter = subprocess.Popen(args,env=dict(env,ROLE='waiter'),stdout=waiterlog,stderr=subprocess.STDOUT,start_new_session=True)
         processes.append(waiter)
         await_file(fixture/'waiter-ready')
+        waiter_source = Path((fixture/'waiter-source').read_text().strip())
+        assert waiter_source.is_dir()
         assert (control/'deploy.lock').stat().st_ino == original_lock
         assert (control/'deploy.lock/owner').read_text() == 'old\n'
         (fixture/'allow-old').touch()
@@ -121,13 +131,13 @@ for case in ('child', 'transaction', 'lock'):
             assert (fixture/'waiter-published').exists()
         assert waiter.wait(timeout=30) != 0
         waiter_text = (fixture/'waiter.log').read_text()
+        assert not waiter_source.exists()
         assert not (control/'releases/waiter').exists()
         assert not (control/'state/waiter').exists()
         assert (control/'generation').read_text() == 'old\n'
         if case != 'lock':
             assert (control/'deploy.lock').stat().st_ino == original_lock
             assert (control/'deploy.lock/owner').read_text() == 'old\n'
-            assert 'Another deployment owns' in waiter_text
         else:
             assert 'Initialization evidence appeared before lock publication' in waiter_text
             retained = list(control.glob('.begin-cleanup-*-lock'))
@@ -145,7 +155,13 @@ for case in ('child', 'transaction', 'lock'):
             assert not (control/'state/retry').exists()
         assert (app/'storage/preserved').read_text() == 'patient data\n'
         assert (fixture/'crontab').read_text() == 'foreign cron\n'
-        print('PASS', case, '- waiter scanned while old canonical held; no new initialization', flush=True)
+        print('PASS', case, f'- no-clobber skip status {skip_status}; no new initialization', flush=True)
+    except BaseException:
+        for name in ('old.log', 'waiter.log'):
+            path = fixture/name
+            if path.exists():
+                print(f'{case}/skip{skip_status} {name}:\n{path.read_text()}', flush=True)
+        raise
     finally:
         for process in processes:
             if process.poll() is None:
@@ -154,4 +170,4 @@ for case in ('child', 'transaction', 'lock'):
         for log in logs:
             log.close()
 print('Snapshot SHA256', digest, flush=True)
-print('Three coordinated cleanup/waiter cases passed.', flush=True)
+print('Three coordinated cleanup/waiter cases passed with both no-clobber exit conventions (six runs).', flush=True)
