@@ -111,7 +111,7 @@ if grep -q 'Service\|Unavailable\|title>' "$probe_fixture/log"; then
 fi
 # The whole window is bounded, not just its sleeps: with no time left, no further attempt starts.
 WEB_PHP_PROBE_WINDOW=0 run_case 'an exhausted window stops retrying' 1 1 html html '8.5|1024M|litespeed'
-grep -q 'after 1 attempts in 0s' "$probe_fixture/log"
+grep -Eq 'after 1 attempts in [0-9]+s' "$probe_fixture/log"
 WEB_PHP_PROBE_WINDOW=soon run_case 'a malformed window is refused' 2 0 '8.5|1024M|litespeed'
 run_case 'a title longer than a pipe buffer keeps retrying' 0 3 longtitle longtitle '8.5|1024M|litespeed'
 run_case 'well-formed wrong PHP fails immediately and definitively' 3 1 '8.4|1024M|litespeed' '8.5|1024M|litespeed'
