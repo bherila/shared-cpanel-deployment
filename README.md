@@ -256,7 +256,10 @@ paused, old code is down, and the worker-drain hook passed. From that point unti
 and `artisan up`, no release is intentionally served. A failed or partially applied migration under
 the default `failure-policy: maintenance` leaves
 the **old selected release** in maintenance. A failure after selection leaves the candidate selected in
-maintenance. The paused application cron lines are preserved privately under
+maintenance, unless it had already served and passed `health-path`: a candidate the
+action brought up and then proved healthy is left serving, uncommitted and with its cron, when a later
+read-only check (the web PHP probe, `verification-script`) fails. The run still fails. That exception
+applies only to `failure-policy: maintenance`; `rollback` behaves as configured. The paused application cron lines are preserved privately under
 `~/.deployments/<deploy-dir>/recovery/<release-id>.cron` for manual recovery, even after the deployment
 transaction unlocks. Selection and service state are always reported separately.
 

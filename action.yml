@@ -1175,6 +1175,18 @@ runs:
           "${SITE_URL%/}$HEALTH_PATH" >/dev/null
         echo "Healthy: ${SITE_URL%/}$HEALTH_PATH"
 
+    - name: Record that the selected atomic release served healthily
+      if: inputs.deployment-mode == 'atomic' && inputs.health-path != ''
+      shell: bash
+      env:
+        TARGET: ${{ steps.ssh.outputs.target }}
+        DEPLOY_DIR: ${{ inputs.deploy-dir }}
+        RELEASE_ID: ${{ steps.resolve.outputs.release-id }}
+      run: |
+        set -euo pipefail
+        ssh "$TARGET" "bash -s -- $(printf '%q ' mark-healthy "$DEPLOY_DIR" "$RELEASE_ID")" \
+          <"$GITHUB_ACTION_PATH/scripts/atomic-release.sh"
+
     - name: Verify the web handler's PHP version and memory limit
       if: inputs.verify-web-php == 'true'
       shell: bash
