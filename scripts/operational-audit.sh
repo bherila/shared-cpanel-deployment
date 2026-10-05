@@ -213,8 +213,36 @@ try {
     $runtime = ($argv[1] ?? '') !== '';
     $key = 'config.cache'; $rootType = 'stable'; $kind = 'file'; $reason = 'invalid';
     $cache = $app->getCachedConfigPath();
+    $present = file_exists($cache) || is_link($cache);
+    if ($app instanceof Illuminate\Foundation\Application
+        && $app->bound(Illuminate\Foundation\Bootstrap\LoadEnvironmentVariables::class)) {
+        throw new RuntimeException('custom environment bootstrapper');
+    }
+    if (!$present && $app instanceof Illuminate\Foundation\Application) {
+        // Laravel first checks the externally selected/default cache. Only when
+        // absent does it load dotenv and resolve a possible custom cache path.
+        // Do not repeat the existence check: a late original cache must never
+        // suppress dotenv loading or become executable bootstrap input.
+        class AuditEnvironmentLoader extends Illuminate\Foundation\Bootstrap\LoadEnvironmentVariables {
+            public function bootstrap(Illuminate\Contracts\Foundation\Application $app) {}
+            public function loadUncached($app): void {
+                $this->checkForSpecificEnvironmentFile($app);
+                $this->createDotenv($app)->safeLoad();
+            }
+        }
+        $environmentLoader = new AuditEnvironmentLoader;
+        $environmentLoader->loadUncached($app);
+        // Full bootstrap must not load dotenv a second time: it could select
+        // another .env.<APP_ENV> or overwrite a dotenv-owned cache override.
+        $app->instance(Illuminate\Foundation\Bootstrap\LoadEnvironmentVariables::class, $environmentLoader);
+        $dotenvCache = $app->getCachedConfigPath();
+        if ($dotenvCache !== $cache) {
+            $cache = $dotenvCache;
+            $present = file_exists($cache) || is_link($cache);
+        }
+    }
     $snapshot = __DIR__.'/config.php';
-    if (file_exists($cache) || is_link($cache)) {
+    if ($present) {
         if (is_link($cache) || !is_file($cache)) { throw new RuntimeException('cache file'); }
         $source = file_get_contents($cache, false, null, 0, 4 * 1024 * 1024 + 1);
         if (!is_string($source) || strlen($source) > 4 * 1024 * 1024) { throw new RuntimeException('cache bound'); }
@@ -364,6 +392,9 @@ try {
     // must never become executable input to Laravel's configuration bootstrap.
     putenv('APP_CONFIG_CACHE='.$snapshot);
     $_ENV['APP_CONFIG_CACHE'] = $_SERVER['APP_CONFIG_CACHE'] = $snapshot;
+    if ($app instanceof Illuminate\Foundation\Application && $app->getCachedConfigPath() !== $snapshot) {
+        throw new RuntimeException('unsupported cache override');
+    }
     $app->make(Illuminate\Contracts\Console\Kernel::class)->bootstrap();
     if ($runtime && $argv[5] === 'finalized' && $app->isDownForMaintenance()) { $fail('deployment.serving', 'stable', 'serving', 'maintenance'); }
     $migrator = $app->make('migrator');
