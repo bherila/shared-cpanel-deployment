@@ -22,6 +22,13 @@ atomic_default=$(awk '$1 == "deployment-mode:" { found=1 } found && $1 == "defau
 check "v2 defaults to atomic deployment" test "$atomic_default" = atomic
 layout_default=$(awk '$1 == "atomic-layout:" { found=1 } found && $1 == "default:" { print $2; exit }' "$action")
 check "atomic deployment defaults to a cPanel-compatible real stable directory" test "$layout_default" = stable-directory
+# 2026-10-05: a proxy rule challenging the runner's location answered the health check and the
+# PHP probe with its own HTML 200. Both now ask the host's own web server, and health needs text.
+health_expect_default=$(awk '$1 == "health-expect:" { found=1 } found && $1 == "default:" { $1=""; sub(/^ /, ""); print; exit }' "$action")
+check "health requires Laravel's /up text by default" test "$health_expect_default" = 'Application up'
+check "the health check is fetched from the origin, not through the proxy" grep -Fq 'scripts/origin-fetch.sh" >"$raw"' "$action"
+check "the health check no longer curls the public URL from the runner" bash -c '! grep -Fq -- "\"\${SITE_URL%/}\$HEALTH_PATH\"" "$1"' _ "$action"
+check "the web PHP probe is fetched from the origin" grep -Fq 'origin-fetch.sh' "$here/scripts/verify-web-php.sh"
 check "legacy in-place mode remains an explicit branch" grep -Fq "inputs.deployment-mode == 'in-place'" "$action"
 check "the selected atomic layout is persisted with the remote transaction" grep -Fq '"$ATOMIC_LAYOUT" "${paths[@]}"' "$action"
 
