@@ -33,6 +33,7 @@ response=$(sed -n "${count}p" "$PROBE_FIXTURE/responses")
 case $response in
     html) printf '<!DOCTYPE html>\nPRIVATE_ERROR_DETAIL\n' >"$output"; printf '200|text/html; charset=UTF-8' ;;
     multiline) printf '8.5|1024M|litespeed\nPRIVATE_ERROR_DETAIL\n' >"$output"; printf '200|text/plain' ;;
+    longtitle) { printf '<html><title>'; head -c 300000 /dev/zero | tr '\0' 'a'; printf '</title></html>\n'; } >"$output"; printf '200|text/html' ;;
     titled) printf '<html><head>\n<title>Service "Unavailable" | 8.5|1G|x</title></head><body>PRIVATE_ERROR_DETAIL</body></html>\n' >"$output"; printf '200|text/html' ;;
     transport) : >"$output"; printf '000|'; exit 7 ;;
     *) printf '%s' "$response" >"$output"; printf '200|text/plain' ;;
@@ -83,6 +84,7 @@ if grep -q '"Unavailable"\|</\?title' "$probe_fixture/log"; then
     echo 'FAIL - an HTML title was reported with markup or quotes'
     exit 1
 fi
+run_case 'a title longer than a pipe buffer keeps retrying' 0 3 longtitle longtitle '8.5|1024M|litespeed'
 run_case 'well-formed wrong PHP fails immediately' 1 1 '8.4|1024M|litespeed' '8.5|1024M|litespeed'
 run_case 'insufficient memory fails immediately' 1 1 '8.5|128M|litespeed' '8.5|1024M|litespeed'
 run_case 'extra fields and multiline content fail closed' 1 8 '8.5|1024M|litespeed|extra' multiline '8.5|bogus|litespeed'

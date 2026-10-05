@@ -106,7 +106,10 @@ for (( attempt = 1; attempt <= attempts; attempt++ )); do
     # of an HTML page only its <title>, reduced to plain words, to say what answered instead.
     content_type=${content_type%%;*}
     [[ $content_type =~ ^[A-Za-z0-9.+-]+/[A-Za-z0-9.+-]+$ ]] || content_type=unknown
-    title=$(tr '\n\r' '  ' <"$response_file" 2>/dev/null | sed -n 's/.*<[Tt][Ii][Tt][Ll][Ee][^>]*>\([^<]*\)<.*/\1/p' | head -c 200 | tr -cd 'A-Za-z0-9 .,:()-' | cut -c1-80)
+    # Truncated in the shell, not with head: head closing the pipe early would SIGPIPE sed on a
+    # long title, and under pipefail that would end the probe before its retries and diagnostic.
+    title=$(tr '\n\r' '  ' <"$response_file" 2>/dev/null | sed -n 's/.*<[Tt][Ii][Tt][Ll][Ee][^>]*>\([^<]*\)<.*/\1/p' | tr -cd 'A-Za-z0-9 .,:()-') || title=''
+    title=${title:0:80}
     detail="HTTP $http_status, content-type $content_type${title:+, title \"$title\"}"
     if [ "$attempt" -eq "$attempts" ]; then
         echo "::error::The web PHP probe $reason after $attempts attempts ($detail). Check the site's document root, rewrite rules, and proxy/WAF routing; this response does not establish a PHP version." >&2
