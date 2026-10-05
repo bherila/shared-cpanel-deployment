@@ -111,11 +111,12 @@ check "remote deployment scripts never require process substitution" bash \
     "$here/scripts/remote-artisan.sh" "$here/scripts/assert-no-pending-migrations.sh" \
     "$here/scripts/configure-env.sh" "$here/scripts/ensure-passport-keys.sh" \
     "$here/scripts/ensure-webroot-symlink.sh" "$here/scripts/install-branding.sh" \
-    "$here/scripts/install-cron.sh"
+    "$here/scripts/install-cron.sh" "$here/scripts/origin-fetch.sh" "$here/scripts/recover-orphan-remote.sh" \
+    "$here/scripts/validate-recover-orphan-inputs.sh"
 check "remote upload heredocs never require process substitution" bash \
     "$here/scripts/assert-no-process-substitution.sh" --heredoc REMOTE \
     "$here/scripts/rsync-deploy.sh" "$here/scripts/rsync-migrations.sh" \
-    "$here/scripts/rsync-atomic-release.sh"
+    "$here/scripts/rsync-atomic-release.sh" "$here/scripts/run-recover-orphan.sh"
 
 runtime=$(line_of 'name: Audit canonical selected runtime paths')
 final_runtime=$(line_of 'name: Audit finalized runtime and transaction state')

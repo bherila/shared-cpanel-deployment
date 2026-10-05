@@ -299,3 +299,4 @@ fi
 echo 'Real SQLite partial failure preserves exact prior real-directory code/storage, maintenance and paused cron; partial schema is NOT rolled back.'
 
 printf 'Laravel %s real maintenance probe passed.\n' "$version"
+bash "$here/test-real-laravel-orphan.sh" "$HOME/app" "$php_binary"

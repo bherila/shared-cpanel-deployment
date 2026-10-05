@@ -60,11 +60,18 @@ remote_rejects() {
     ! bash "$here/assert-no-process-substitution.sh" --heredoc REMOTE "$scratch/remote-fixture.sh" \
         >"$scratch/result" 2>&1 && grep -q '\[SC3001\]' "$scratch/result"
 }
-for helper in rsync-deploy.sh rsync-migrations.sh rsync-atomic-release.sh; do
+for helper in rsync-deploy.sh rsync-migrations.sh rsync-atomic-release.sh run-recover-orphan.sh; do
     check "$helper remote input argument substitution is rejected" remote_rejects "$helper" 'cat <(printf input)'
     check "$helper remote output argument substitution is rejected" remote_rejects "$helper" 'tee >(cat)'
     check "$helper remote read-loop substitution is rejected" remote_rejects "$helper" \
         'while read -r row; do printf "%s" "$row"; done < <(printf input)'
+done
+for injection in 'cat <(printf input)' 'tee >(cat)' 'while read -r row; do printf "%s" "$row"; done < <(printf input)'; do
+    cat "$here/origin-fetch.sh" >"$scratch/origin-fixture.sh"
+    printf '\n%s\n' "$injection" >>"$scratch/origin-fixture.sh"
+    check "origin-fetch.sh remote substitution is rejected: $injection" bash -c \
+        '! bash "$1" "$2" >"$3" 2>&1 && grep -q "\[SC3001\]" "$3"' sh \
+        "$here/assert-no-process-substitution.sh" "$scratch/origin-fixture.sh" "$scratch/origin-result"
 done
 cat >"$scratch/multiple.sh" <<'FIXTURE'
 #!/usr/bin/env bash
