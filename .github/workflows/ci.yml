@@ -69,6 +69,9 @@ jobs:
       - name: verify-web-php.sh harness
         run: bash scripts/test-verify-web-php.sh
 
+      - name: origin-fetch.sh harness
+        run: bash scripts/test-origin-fetch.sh
+
       - name: configure-env.sh harness
         run: bash scripts/test-configure-env.sh
 
