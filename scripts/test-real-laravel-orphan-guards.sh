@@ -73,8 +73,9 @@ expect_refusal() {
 }
 
 prepare() {
-    framework preflight
+    state inspect "$bundle/preflight-record.json"
     state initialize "$bundle/preflight-record.json"
+    framework preflight
     framework prepare
     state owned-down
 }
@@ -108,9 +109,11 @@ for kind in Config Services Packages Routes Events; do
         if ($count!==1 || file_put_contents($path,$source)!==strlen($source)) { exit(1); }
     ' "$stable/bootstrap/app.php" "$kind" "$leaf"
     "$php" -l "$stable/bootstrap/app.php" >"$work/lint"
+    state inspect "$bundle/preflight-record.json"
+    state initialize "$bundle/preflight-record.json"
     expect_refusal framework preflight
-    [[ ! -e $control/deploy.lock && ! -e $record ]]
-    checks=$((checks + 1))
+    [[ $(cat "$control/deploy.lock/owner") == "$token" ]]
+    unlock_unchanged_down
 done
 
 cat >"$work/override-bootstrap.php" <<'PHP_WRITER'
@@ -188,14 +191,18 @@ for override in bound-configuration custom-kernel already-bootstrapped external-
     poison "$work/external-environment/app.php"
     "$php" "$work/override-bootstrap.php" "$stable/bootstrap/app.php" "$override" "$work/external-environment"
     "$php" -l "$stable/bootstrap/app.php" >"$work/lint"
+    state inspect "$bundle/preflight-record.json"
+    state initialize "$bundle/preflight-record.json"
     expect_refusal framework preflight
     if [[ $override == resolved-* ]]; then [[ $(cat "$case_home/guard-kernel-resolved") == resolved ]]; fi
-    [[ ! -e $control/deploy.lock && ! -e $record ]]
-    checks=$((checks + 1))
+    [[ $(cat "$control/deploy.lock/owner") == "$token" ]]
+    # Keep the exact unsupported source captured by initialization: restore is
+    # filesystem-only and must not require bootstrapping that source.
+    unlock_unchanged_down
 done
 
 new_case newer-preflight-marker
-framework preflight
+state inspect "$bundle/preflight-record.json"
 mv "$stable/storage/framework/down" "$work/held-down"
 cp -p "$work/held-down" "$stable/storage/framework/down"
 expect_refusal state initialize "$bundle/preflight-record.json"

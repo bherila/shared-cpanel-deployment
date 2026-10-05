@@ -72,9 +72,10 @@ if [[ $mode == restore ]]; then
     echo 'orphan-recovery result=restored identity=exact maintenance=original cron=paused lock=released'
     exit 0
 fi
-state inspect && cron_paused && framework preflight maintenance || exit 1
+state inspect "$here/preflight-record.json" && cron_paused || exit 1
 started=true
 state initialize "$here/preflight-record.json" && state owned-down && cron_paused || exit 1
+framework preflight maintenance && state owned-down || exit 1
 framework prepare maintenance && audit owned-down && state owned-down && cron_paused || exit 1
 state up-armed
 may_up=true

@@ -72,7 +72,9 @@ non-cancelling and use a dedicated pinned SSH key/host configuration.
 
 ## Preparation and successful serving
 
-One host session atomically acquires the canonical lock. A private durable
+The unlocked preflight inspects only filesystem state and writes a private bounded
+snapshot. One host session then atomically acquires the canonical lock and re-proves
+that snapshot before any Laravel application or provider bootstrap. A private durable
 `recovery/<token>/record.json` captures exact lock and selected/storage ancestor
 device/inode identity, critical source/environment/metadata hashes, phase and the
 original maintenance bytes/modes. These records remain outside release data with
@@ -114,6 +116,12 @@ overwritten. Successfully confirmed maintenance restoration alone permits releas
 Rebuilt caches remain; original configuration/provider/route/event/facade cache PHP
 is never rolled back. The original rendered maintenance PHP remains part of the
 saved maintenance marker payload and is restored directly without executing it.
+Restore persists a unique temporary-file intent before creation, then persists its
+empty 0600 file's inode before writing maintenance bytes. Interrupted partial writes
+resume only that proved inode. A kill between creation and inode persistence retains
+the referenced empty private file and lock for manual inspection; it never writes
+the maintenance secret into an untracked file. Unfinished temporary intent always
+prevents lock release, and replacement files are never adopted or removed.
 
 PHP/state calls have finite memory and 10/45-second deadlines; audits have independent
 30/60-second PHP/host limits. The host transaction has 240 seconds plus 45 seconds

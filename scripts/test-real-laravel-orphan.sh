@@ -29,6 +29,14 @@ cat >"$stable/app/Providers/RecoveryFixtureProvider.php" <<'PHP'
 namespace App\Providers;
 class RecoveryFixtureProvider extends \Illuminate\Support\ServiceProvider {
     public function boot(): void {
+        $cache=$this->app->getCachedConfigPath();
+        if (str_contains($cache,'/preflight/config.php') || str_contains($cache,'/recovery/orphan-')) {
+            $lock=getenv('HOME').'/.deployments/app/deploy.lock';
+            if (!is_dir($lock) || is_link($lock) || !preg_match('/\Aorphan-[a-f0-9]{32}\n\z/',file_get_contents($lock.'/owner'))) {
+                throw new \RuntimeException('recovery provider bootstrap requires owned canonical lock');
+            }
+            file_put_contents(storage_path('app/recovery-provider-owned'),'yes');
+        }
         if (file_exists(storage_path('app/break-bootstrap'))) { throw new \RuntimeException('deliberately broken trusted bootstrap'); }
         if (\Facades\App\Services\RecoveryFixtureTarget::answer() !== 42) { throw new \RuntimeException('facade semantics'); }
     }
@@ -84,15 +92,22 @@ resume() {
 new_bundle
 step=custom-path-refusal
 if APP_CONFIG_CACHE=bootstrap/cache/custom.php resume; then echo 'External custom config path must be refused' >&2; exit 1; fi
-[[ ! -e $control/deploy.lock && ! -e $control/recovery/$token && ! -e $HOME/unsafe-orphan-cache ]]
+[[ ! -e $control/deploy.lock && -d $control/recovery/$token && ! -e $HOME/unsafe-orphan-cache ]]
+cmp -s "$stable/storage/framework/down" "$work/original-down"
+grep -Fq 'rollback=maintenance cron=paused lock=released' "$work/output"
+new_bundle
 printf '\nAPP_CONFIG_CACHE=bootstrap/cache/custom.php\n' >>"$stable/.env"
 if resume; then echo 'Dotenv custom config path must be refused' >&2; exit 1; fi
-[[ ! -e $control/deploy.lock && ! -e $control/recovery/$token && ! -e $HOME/unsafe-orphan-cache ]]
+[[ ! -e $control/deploy.lock && -d $control/recovery/$token && ! -e $HOME/unsafe-orphan-cache ]]
+cmp -s "$stable/storage/framework/down" "$work/original-down"
+grep -Fq 'rollback=maintenance cron=paused lock=released' "$work/output"
 cp "$work/original-env" "$stable/.env"
+new_bundle
 step=resume
 resume
 grep -Fq 'result=serving identity=exact runtime=valid pending_migrations=0 cron=paused lock=released' "$work/output"
 [[ ! -e $control/deploy.lock && ! -e $stable/storage/framework/down && ! -e $HOME/unsafe-orphan-cache ]]
+[[ $(cat "$stable/storage/app/recovery-provider-owned") == yes ]]
 [[ ! -e $stable/bootstrap/cache/routes-v7.php && ! -e $stable/bootstrap/cache/events.php ]]
 [[ $(sha256sum "$database") == "$db_hash "* && $(sha256sum "$stable/.deploy-release") == "$metadata_hash "* ]]
 cmp -s "$stable/.env" "$work/original-env"

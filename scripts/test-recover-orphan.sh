@@ -39,7 +39,9 @@ require __DIR__.'/recover-orphan-state.php';
 [, $mode, $app, $release, $commit, $token, $paths] = $argv;
 $state = new OrphanRecoveryState($app, $release, $commit, $token, $paths);
 if ($mode === 'preflight') {
-    file_put_contents(__DIR__.'/preflight-record.json', json_encode($state->inspect()));
+    $state->owned('present');
+    file_put_contents(getenv('FIXTURE_ROOT').'/framework-owned', 'yes');
+    if (getenv('CASE_FAILURE') === 'preflight') { exit(1); }
     if (getenv('CASE_FAILURE') === 'preflight-marker') {
         $path=$state->storage.'/framework/down'; $stat=stat($path); copy($path,$path.'.new'); chmod($path.'.new',$stat['mode']&0777); touch($path.'.new',$stat['mtime']); rename($path.'.new',$path);
     }
@@ -93,7 +95,7 @@ run() {
 }
 state() {
     if [[ $1 == initialize ]]; then
-        env HOME="$task_home" "$php" "$bundle/recover-orphan-framework.php" preflight app selected-1 "$commit" "$token" storage >/dev/null
+        env HOME="$task_home" "$php" "$bundle/recover-orphan-state.php" inspect app selected-1 "$commit" "$token" storage "$bundle/preflight-record.json" >/dev/null
     fi
     env HOME="$task_home" "$php" "$bundle/recover-orphan-state.php" "$1" app selected-1 "$commit" "$token" storage "$bundle/preflight-record.json" >"$root/state-output" 2>&1
 }
@@ -117,12 +119,18 @@ grep -Fq 'result=serving identity=exact runtime=valid pending_migrations=0 cron=
 [[ ! -e $stable/storage/framework/down && ! -e $control/deploy.lock ]]
 preserved
 pass 'successful exact recovery leaves app cron paused and foreign/patient/environment data unchanged'
-for failure_case in cache audit up health cron-read term-up term-cache; do
+for failure_case in preflight cache audit up health cron-read term-up term-cache; do
     setup; failure=$failure_case
     reject
     restored
     pass "failure at $failure_case restores exact markers/modes without bootstrap and releases owned lock"
 done
+setup
+state inspect
+mkdir "$control/deploy.lock"; printf 'competing-deployment\n' >"$control/deploy.lock/owner"
+if env HOME="$task_home" "$php" "$bundle/recover-orphan-state.php" initialize app selected-1 "$commit" "$token" storage "$bundle/preflight-record.json" >"$root/state-output" 2>&1; then exit 1; fi
+[[ ! -e $root/framework-owned && $(cat "$control/deploy.lock/owner") == competing-deployment ]]
+pass 'a competing deployment after filesystem preflight prevents every provider bootstrap'
 for mutation in metadata marker state alias unsafe uncertainty releases-uncertainty; do
     setup
     case $mutation in
@@ -150,8 +158,8 @@ done
 setup; failure=preflight-marker
 original_inode=$(stat -c %i "$stable/storage/framework/down")
 reject
-[[ ! -e $control/deploy.lock && $(stat -c %i "$stable/storage/framework/down") != "$original_inode" ]]
-pass 'byte-identical operator marker after preflight refuses acquisition'
+[[ -d $control/deploy.lock && $(stat -c %i "$stable/storage/framework/down") != "$original_inode" ]]
+pass 'byte-identical operator marker during owned preflight retains the lock'
 setup; failure=byte-marker
 reject
 [[ -d $control/deploy.lock && -f $stable/storage/framework/down ]]
@@ -202,6 +210,50 @@ failure=health
 reject
 restored
 pass 'large valid original marker payloads retain readable bounded proof throughout exact restoration'
+for interruption in intent created inode partial foreign; do
+    setup
+    state initialize
+    env HOME="$task_home" "$php" -r '
+        $control=getenv("HOME")."/.deployments/app";
+        $path=$control."/recovery/".$argv[1]."/record.json";
+        $d=json_decode(file_get_contents($path),true);
+        $marker=$control."/shared/storage/framework/down"; unlink($marker);
+        $temporary=dirname($marker)."/.orphan-restore-".str_repeat("b",32);
+        $d["phase"]="restoring"; $d["pendingTemporary"]["down"]=basename($temporary);
+        if ($argv[2]!=="intent") {
+            file_put_contents($temporary,""); chmod($temporary,0600); $s=stat($temporary);
+            if ($argv[2]!=="created") { $d["temporaryIds"]["down"]=[$s["dev"],$s["ino"]]; }
+            if ($argv[2]==="partial") { file_put_contents($temporary,substr(base64_decode($d["down"]["bytes"]),0,5)); }
+            if ($argv[2]==="foreign") {
+                rename($temporary,$temporary.".original"); file_put_contents($temporary,"foreign-payload"); chmod($temporary,0600);
+            }
+        }
+        file_put_contents($path,json_encode($d));
+    ' "$token" "$interruption"
+    if [[ $interruption == created || $interruption == foreign ]]; then
+        if run restore; then exit 1; fi
+        [[ -d $control/deploy.lock && ! -e $stable/storage/framework/down ]]
+        temporary="$stable/storage/framework/.orphan-restore-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        if [[ $interruption == created ]]; then [[ ! -s $temporary && $(stat -c %a "$temporary") == 600 ]]
+        else [[ $(cat "$temporary") == foreign-payload ]]; fi
+    else
+        run restore
+        restored
+        [[ ! -e $stable/storage/framework/.orphan-restore-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb ]]
+    fi
+    pass "restore creation interruption at $interruption preserves exact durable intent and inode ownership"
+done
+setup
+state initialize
+env HOME="$task_home" "$php" -r '
+    $p=getenv("HOME")."/.deployments/app/recovery/".$argv[1]."/record.json";
+    $d=json_decode(file_get_contents($p),true); $d["phase"]="restored";
+    $d["pendingTemporary"]["down"]=".orphan-restore-".str_repeat("c",32);
+    file_put_contents($p,json_encode($d));
+' "$token"
+if state release-down; then exit 1; fi
+[[ $(cat "$control/deploy.lock/owner") == "$token" ]]
+pass 'even restored maintenance cannot release ownership with unfinished temporary intent'
 for interruption in planned linked unlinked; do
     setup
     state initialize

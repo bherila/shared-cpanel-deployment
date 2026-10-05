@@ -173,6 +173,15 @@ final class OrphanRecoveryState
             'rendered' => $this->marker('maintenance.php', true), 'phase' => 'prepared', 'lock' => null];
     }
 
+    public function preflight(string $snapshot): void
+    {
+        if ($snapshot !== __DIR__.'/preflight-record.json') { throw new RuntimeException; }
+        self::directory(dirname($snapshot));
+        $bytes = json_encode($this->inspect(), JSON_THROW_ON_ERROR);
+        if (strlen($bytes) > self::RECORD_BOUND) { throw new RuntimeException; }
+        self::write($snapshot, $bytes);
+    }
+
     private static function write(string $path, string $bytes, int $mode = 0600): void
     {
         $temporary = dirname($path).'/.orphan-'.bin2hex(random_bytes(16));
@@ -347,18 +356,53 @@ final class OrphanRecoveryState
         // Re-prove immediately before each write. No Artisan or application bootstrap.
         foreach (['rendered' => 'maintenance.php', 'down' => 'down'] as $key => $name) {
             $this->owned();
+            if (isset($record['pendingTemporary'][$key]) && !isset($record['pendingMarkers'][$key])
+                && $this->marker($name, true) !== null) { throw new RuntimeException; }
             if ($record[$key] !== null && $this->marker($name, true) === null) {
                 if (!isset($record['pendingMarkers'][$key])) {
                     $bytes = base64_decode($record[$key]['bytes'], true);
                     if (!is_string($bytes) || hash('sha256', $bytes) !== $record[$key]['hash']) { throw new RuntimeException; }
-                    $temporary = $this->storage.'/framework/.orphan-restore-'.bin2hex(random_bytes(16));
-                    $handle = fopen($temporary, 'x');
-                    if (!$handle || fwrite($handle, $bytes) !== strlen($bytes) || !fflush($handle) || !fsync($handle)
-                        || !chmod($temporary, $record[$key]['mode']) || !touch($temporary, $record[$key]['mtime'])) { throw new RuntimeException; }
-                    fclose($handle);
+                    if (!isset($record['pendingTemporary'][$key])) {
+                        $record['pendingTemporary'][$key] = '.orphan-restore-'.bin2hex(random_bytes(16));
+                        $this->save($record); // Durable intent before even an empty file exists.
+                    }
+                    $temporaryName = $record['pendingTemporary'][$key];
+                    if (!is_string($temporaryName) || !preg_match('/\A\.orphan-restore-[a-f0-9]{32}\z/', $temporaryName)) { throw new RuntimeException; }
+                    $temporary = $this->storage.'/framework/'.$temporaryName;
+                    $this->owned();
+                    if (!isset($record['temporaryIds'][$key])) {
+                        // A kill before inode persistence leaves a referenced empty
+                        // private file. Its ownership is unprovable: retain, never adopt.
+                        if (file_exists($temporary) || is_link($temporary)) { throw new RuntimeException; }
+                        $handle = fopen($temporary, 'x');
+                        if (!$handle || !chmod($temporary, 0600)) { throw new RuntimeException; }
+                        $stat = fstat($handle);
+                        $record['temporaryIds'][$key] = [$stat['dev'], $stat['ino']];
+                        $this->save($record); // Persist the inode before writing secrets.
+                    } else {
+                        self::bytes($temporary, 32768);
+                        $handle = fopen($temporary, 'r+');
+                        if (!$handle) { throw new RuntimeException; }
+                    }
+                    try {
+                        $stat = fstat($handle);
+                        if ([$stat['dev'], $stat['ino']] !== $record['temporaryIds'][$key]) { throw new RuntimeException; }
+                        $this->owned();
+                        self::bytes($temporary, 32768);
+                        $stat = stat($temporary);
+                        if ([$stat['dev'], $stat['ino']] !== $record['temporaryIds'][$key] || !chmod($temporary, 0600)) { throw new RuntimeException; }
+                        if (!ftruncate($handle, 0) || !rewind($handle) || fwrite($handle, $bytes) !== strlen($bytes)
+                            || !fflush($handle) || !fsync($handle)) { throw new RuntimeException; }
+                    } finally {
+                        fclose($handle);
+                    }
+                    $this->owned();
+                    self::bytes($temporary, 32768);
                     $stat = stat($temporary);
-                    $record['pendingMarkers'][$key] = array_replace($record[$key], ['id' => [$stat['dev'], $stat['ino']]]);
-                    $record['pendingTemporary'][$key] = basename($temporary);
+                    if ([$stat['dev'], $stat['ino']] !== $record['temporaryIds'][$key]
+                        || !chmod($temporary, $record[$key]['mode']) || !touch($temporary, $record[$key]['mtime'])) { throw new RuntimeException; }
+                    $record['pendingMarkers'][$key] = array_replace($record[$key], ['id' => $record['temporaryIds'][$key]]);
+                    if ($this->marker($temporaryName, true) !== $record['pendingMarkers'][$key]) { throw new RuntimeException; }
                     $this->save($record);
                 }
                 $temporaryName = $record['pendingTemporary'][$key] ?? '';
@@ -378,7 +422,7 @@ final class OrphanRecoveryState
                     if ($this->marker($temporaryName, true) !== $record['pendingMarkers'][$key] || !unlink($temporary)) { throw new RuntimeException; }
                 }
                 $record['restoredMarkers'][$key] = $record['pendingMarkers'][$key];
-                unset($record['pendingMarkers'][$key], $record['pendingTemporary'][$key]);
+                unset($record['pendingMarkers'][$key], $record['pendingTemporary'][$key], $record['temporaryIds'][$key]);
                 $this->save($record);
             }
         }
@@ -418,6 +462,9 @@ final class OrphanRecoveryState
     public function release(bool $serving): void
     {
         $record = $this->owned($serving ? 'absent' : 'present');
+        if (!empty($record['pendingTemporary']) || !empty($record['pendingMarkers']) || !empty($record['temporaryIds'])) {
+            throw new RuntimeException;
+        }
         if ($serving && $record['phase'] !== 'verifying') {
             throw new RuntimeException;
         }
@@ -453,7 +500,8 @@ if (realpath($_SERVER['SCRIPT_FILENAME'] ?? '') === __FILE__) {
         [, $mode, $app, $release, $commit, $token, $persistent] = $argv;
         $state = new OrphanRecoveryState($app, $release, $commit, $token, $persistent);
         match ($mode) {
-            'inspect' => $state->inspect(), 'initialize' => $state->initialize($argv[7]),
+            'inspect' => empty($argv[7]) ? $state->inspect() : $state->preflight($argv[7]),
+            'initialize' => $state->initialize($argv[7]),
             'owned-down' => $state->owned('present'), 'owned-up' => $state->owned('absent'),
             'restore' => $state->restore(), 'release-down' => $state->release(false),
             'release-up' => $state->release(true),

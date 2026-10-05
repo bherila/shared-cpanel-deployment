@@ -20,7 +20,8 @@ try {
     ob_start();
     $state = new OrphanRecoveryState($appName, $release, $commit, $token, $persistent);
     if ($mode === 'preflight') {
-        $preflight = $state->inspect();
+        $preflight = $state->owned('present');
+        if ($preflight['phase'] !== 'owned') { throw new RuntimeException; }
         $private = __DIR__.'/preflight';
     } else {
         $record = $state->owned($mode === 'prove-up' ? 'absent' : 'present');
@@ -269,8 +270,7 @@ try {
         }
     }
     if ($mode === 'preflight') {
-        if ($state->inspect() !== $preflight || file_put_contents(__DIR__.'/preflight-record.json', json_encode($preflight, JSON_THROW_ON_ERROR), LOCK_EX) === false
-            || !chmod(__DIR__.'/preflight-record.json', 0600)) { throw new RuntimeException; }
+        if ($state->owned('present') !== $preflight) { throw new RuntimeException; }
     }
     while (ob_get_level() > 0) {
         ob_end_clean();
