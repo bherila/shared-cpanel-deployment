@@ -51,7 +51,7 @@ post_activate=$(line_of 'name: Run the atomic post-activation script')
 serve=$(line_of 'name: Bring the selected atomic release online')
 candidate_audit=$(line_of 'name: Audit candidate operational state')
 selected_audit=$(line_of 'name: Audit selected operational state before serving')
-verification=$(line_of 'name: Run application-specific live verification')
+verification=$(line_of 'name: Run atomic application-specific live verification')
 commit=$(line_of 'name: Commit the verified atomic release')
 finalize=$(line_of 'name: Recover, unlock and report the atomic deployment')
 
@@ -78,6 +78,14 @@ check "stable-directory cache rebuild is limited to its layout" grep -Fq "if: in
 check "cache rebuild runs through the guarded atomic state machine" grep -Fq 'refresh-caches "$DEPLOY_DIR" "$RELEASE_ID"' "$action"
 check "the atomic state machine refuses to serve before final-path caches exist" grep -Fq 'Stable-directory caches were not rebuilt from the final selected path.' "$here/scripts/atomic-release.sh"
 check "stable hooks finish down and cron starts only after serving proof" test "$stable_cache" -lt "$webroot" -a "$webroot" -lt "$post_activate" -a "$post_activate" -lt "$serve" -a "$serve" -lt "$cron" -a "$cron" -lt "$verification"
+health=$(line_of 'name: Verify site health')
+status=$(line_of 'name: Read the selected atomic release status')
+probe=$(line_of "name: Verify the web handler's PHP version and memory limit")
+mark=$(line_of 'name: Record that the selected atomic release served healthily')
+inplace_verification=$(line_of 'name: Run application-specific live verification')
+check "atomic application proof precedes PHP classification and healthy recording" test "$health" -lt "$status" -a "$status" -lt "$verification" -a "$verification" -lt "$probe" -a "$probe" -lt "$mark"
+check "in-place application verification retains its after-PHP timing" test "$probe" -lt "$inplace_verification"
+check "normal healthy marker requires successful health and nonempty successful app verification" grep -Fq "inputs.verification-script != '' && steps.site-health.outcome == 'success' && steps.atomic-live-verification.outcome == 'success'" "$action"
 check "live verification gates commit" test "$serve" -lt "$verification" -a "$verification" -lt "$commit"
 check "pre-verification status requires the exact serving candidate" grep -Fq 'Selected atomic release is not the exact serving candidate' "$action"
 check "commit rechecks Laravel serving state" grep -Fq 'commit "$DEPLOY_DIR" "$RELEASE_ID" "$PHP_BINARY"' "$action"

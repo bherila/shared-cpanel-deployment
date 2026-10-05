@@ -1108,8 +1108,8 @@ serve() {
     echo "Release $release_id is selected and serving; live verification may begin."
 }
 
-# Record that the selected candidate served and passed the site's own health
-# check. Under failure-policy maintenance, a later read-only verification
+# Record the action's successful site health and application-specific proof
+# after classifying the PHP probe as verified or inconclusive. Under failure-policy maintenance, a later read-only verification
 # failure then leaves it serving rather than taking a healthy site down.
 mark_healthy() {
     if [ "$#" -ne 0 ]; then
@@ -1121,7 +1121,7 @@ mark_healthy() {
     read_value phase
     [ "$REPLY" = serving ] || { echo "::error::Only a serving candidate can be marked healthy." >&2; exit 1; }
     write_value served_healthy true
-    echo "Release $release_id served and passed its health check."
+    echo "Release $release_id served and passed site health and application-specific verification."
 }
 
 # Withdraw the healthy mark: the web handler answered with the wrong runtime,
@@ -1331,10 +1331,10 @@ finalize() {
     read_value served_healthy && served_healthy=$REPLY
     read_value left_serving && left_serving=$REPLY
 
-    # A candidate that already served and passed the health check is left
-    # serving when a later read-only check fails (a flaky probe took a healthy
-    # site down on 2026-10-05). Maintenance is for failures that can leave the
-    # schema and code disagreeing; this is not one. Rollback keeps its meaning.
+    # The action marks only after exact serving identity, site health and
+    # application-specific proof, plus a verified/disabled/inconclusive PHP
+    # classification. Such a candidate can survive a later read-only failure.
+    # Maintenance still applies before that proof. Rollback keeps its meaning.
     #
     # The decision is durable (left_serving) before anything else is written, so
     # a finalizer retried after phase=finalized, or after a failed cleanup that

@@ -51,6 +51,9 @@ jobs:
       - name: remote process-substitution portability fixtures
         run: bash scripts/test-no-process-substitution.sh
 
+      - name: composite live verification and healthy preservation harness
+        run: python3 scripts/test-live-verification.py
+
       - name: read-only application preflight hook harness
         run: bash scripts/test-run-preflight-hook.sh
 
