@@ -85,10 +85,10 @@ run_case 'persistent HTML fails after eight attempts' 1 8 html html html html ht
 grep -q 'HTTP 200, content-type text/html' "$probe_fixture/log"
 grep -q 'after 8 attempts in ' "$probe_fixture/log"
 grep -q 'does not establish a PHP version' "$probe_fixture/log"
-run_case 'an HTML title is reported in plain words only' 1 8 titled titled titled titled titled titled titled titled
-grep -q 'title "Service Unavailable  8.5' "$probe_fixture/log"
-if grep -q '"Unavailable"\|</\?title' "$probe_fixture/log"; then
-    echo 'FAIL - an HTML title was reported with markup or quotes'
+run_case 'an HTML title is reported only as a fingerprint' 1 8 titled titled titled titled titled titled titled titled
+grep -Eq 'title sha256 [0-9a-f]{12}\)' "$probe_fixture/log"
+if grep -q 'Service\|Unavailable\|title>' "$probe_fixture/log"; then
+    echo 'FAIL - the text of an HTML title was disclosed'
     exit 1
 fi
 # The whole window is bounded, not just its sleeps: with no time left, no further attempt starts.

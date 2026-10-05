@@ -116,16 +116,21 @@ for (( attempt = 1; attempt <= attempts; attempt++ )); do
         reason='could not fetch the PHP runtime fields'
     fi
     IFS='|' read -r http_status content_type <<<"$response_meta"
-    # Never print the body: an intermediary/error page might contain unrelated sensitive data.
-    # Ignore arbitrary response header text as well; display only a recognizable MIME type, and
-    # of an HTML page only its <title>, reduced to plain words, to say what answered instead.
+    # Never print the body, or even an HTML page's title: an intermediary or error page can put
+    # user data or a token anywhere in it. Report a recognizable MIME type and, for an HTML page,
+    # only a short SHA-256 of its <title>, which tells whether repeat failures come from the same
+    # page without revealing what it says. Truncation happens in the shell: head closing the
+    # pipe early would SIGPIPE sed on a long title and, under pipefail, end the probe.
     content_type=${content_type%%;*}
     [[ $content_type =~ ^[A-Za-z0-9.+-]+/[A-Za-z0-9.+-]+$ ]] || content_type=unknown
-    # Truncated in the shell, not with head: head closing the pipe early would SIGPIPE sed on a
-    # long title, and under pipefail that would end the probe before its retries and diagnostic.
-    title=$(tr '\n\r' '  ' <"$response_file" 2>/dev/null | sed -n 's/.*<[Tt][Ii][Tt][Ll][Ee][^>]*>\([^<]*\)<.*/\1/p' | tr -cd 'A-Za-z0-9 .,:()-') || title=''
-    title=${title:0:80}
-    detail="HTTP $http_status, content-type $content_type${title:+, title \"$title\"}"
+    title=$(tr '\n\r' '  ' <"$response_file" 2>/dev/null | sed -n 's/.*<[Tt][Ii][Tt][Ll][Ee][^>]*>\([^<]*\)<.*/\1/p') || title=''
+    title_hash=''
+    if [ -n "$title" ]; then
+        title_hash=$(printf '%s' "$title" | openssl dgst -sha256 -r 2>/dev/null) || title_hash=''
+        title_hash=${title_hash:0:12}
+        [[ $title_hash =~ ^[0-9a-f]{12}$ ]] || title_hash=''
+    fi
+    detail="HTTP $http_status, content-type $content_type${title_hash:+, title sha256 $title_hash}"
     pause=${delays[attempt-1]:-0}
     if [ "$attempt" -eq "$attempts" ] || (( SECONDS + pause + 5 > deadline )); then
         echo "::error::The web PHP probe $reason after $attempt attempts in $(( window - (deadline - SECONDS) ))s ($detail). Check the site's document root, rewrite rules, and proxy/WAF routing; this response does not establish a PHP version." >&2
