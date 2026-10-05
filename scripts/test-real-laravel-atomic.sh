@@ -82,6 +82,9 @@ ENV
 bash "$here/operational-audit.sh" app "$php_binary" 256M
 (cd "$HOME/app" && php artisan config:cache >/dev/null)
 bash "$here/operational-audit.sh" app "$php_binary" 256M
+bash "$here/test-real-laravel-cache-path.sh" "$HOME/app" "$php_binary"
+# Restore the default cache removed by the cache-selection fixtures.
+(cd "$HOME/app" && php artisan config:cache >/dev/null)
 # Prove the canonical audit against real Laravel 12/13 cache serialization.
 # Use a separate app identity so these read-only fixtures cannot change the
 # existing app's atomic recovery scenario.
