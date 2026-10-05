@@ -49,7 +49,7 @@ check "missing scripts fail closed" bash -c '! bash "$1" "$2" >/dev/null 2>&1' s
     "$here/assert-no-process-substitution.sh" "$scratch/missing.sh"
 
 # Invoked indirectly through check inside the helper loop.
-# shellcheck disable=SC2329
+# shellcheck disable=SC2317,SC2329
 remote_rejects() {
     local helper=$1 injection=$2
     # Mutate the actual SSH payload, without running any upload or SSH command.
