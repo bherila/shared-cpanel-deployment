@@ -73,7 +73,7 @@ def executable(path, body):
 
 
 def case(name, *, proof=True, verifier=True, php=1, health=True, web=True,
-         unmark_failure=False, interrupt=False, layout="stable-directory", mode="atomic", health_status=200):
+         unmark_failure=False, interrupt=False, layout="stable-directory", mode="atomic", health_status=200, health_expect="Application up", health_text=True, health_ssh_stall=False, health_ssh_oversized=False, health_query=False, health_metadata=""):
     with tempfile.TemporaryDirectory(prefix="shared-live-proof-") as temporary:
         root = Path(temporary)
         home, binaries = root / "home", root / "bin"
@@ -83,7 +83,7 @@ def case(name, *, proof=True, verifier=True, php=1, health=True, web=True,
         env = dict(os.environ, HOME=str(home), PATH=str(binaries) + ":" + os.environ["PATH"],
                    CRONTAB_FILE=str(root / "crontab"), FIXTURE_TRACE=str(trace),
                    FIXTURE_STATE=str(state), FIXTURE_PHP=str(php), FIXTURE_PROOF=str(int(proof)),
-                   FIXTURE_HEALTH_STATUS=str(health_status), FIXTURE_UNMARK_FAILURE=str(int(unmark_failure)), FIXTURE_INTERRUPT=str(int(interrupt)),
+                   FIXTURE_HEALTH_METADATA=health_metadata, FIXTURE_HEALTH_SSH_OVERSIZED=str(int(health_ssh_oversized)), FIXTURE_HEALTH_QUERY=str(int(health_query)), FIXTURE_HEALTH_SSH_STALL=str(int(health_ssh_stall)), FIXTURE_HEALTH_STATUS=str(health_status), FIXTURE_HEALTH_TEXT=str(int(health_text)), FIXTURE_UNMARK_FAILURE=str(int(unmark_failure)), FIXTURE_INTERRUPT=str(int(interrupt)),
                    GITHUB_ACTION_PATH=str(REPO), WEB_PHP_PROBE_WINDOW="75")
         executable(binaries / "php", '''
 while [ "${1:-}" = -d ]; do shift 2; done
@@ -105,12 +105,34 @@ esac
 command=${!#}
 printf '%s\\n' "$command" >>"$FIXTURE_TRACE"
 if [[ "$command" = *unmark-healthy* && "$FIXTURE_UNMARK_FAILURE" = 1 ]]; then exit 91; fi
+if [[ "$command" = 'bash -s -- '* && "$command" = *'/up '* ]]; then
+  if [[ "$FIXTURE_HEALTH_SSH_STALL" = 1 ]]; then /usr/bin/sleep 30; exit 1; fi
+  if [[ "$FIXTURE_HEALTH_SSH_OVERSIZED" = 1 ]]; then exec head -c 1048576 /dev/zero; fi
+  case "$FIXTURE_HEALTH_METADATA" in
+    nul) printf 'Application up\\nORIGIN-META 2\\00000|text/html\\n'; exit 0 ;;
+    secret) printf 'Application up\\nORIGIN-META SECRET_TOKEN|text/html\\n'; exit 0 ;;
+    unterminated) printf 'Application up\\nORIGIN-META 200|text/html'; exit 0 ;;
+  esac
+fi
 exec bash -c "$command"
 ''')
         executable(binaries / "sleep", "exit 0\n")
+        executable(binaries / "hostname", "exit 0\n")
+        executable(binaries / "uapi", '''
+[[ "$FIXTURE_HEALTH_QUERY" = 1 ]] || exit 1
+printf '  ip: 127.0.0.1\\n'
+''')
+        executable(binaries / "timeout", '''
+if [[ "$FIXTURE_HEALTH_SSH_STALL" = 1 && "${1:-}" = --signal=KILL && "${2:-}" = 20s && "${3:-}" = ssh ]]; then
+  printf 'health-ssh-budget=20\\n' >>"$FIXTURE_TRACE"
+  shift 2
+  exec /usr/bin/timeout --signal=KILL 1s "$@"
+fi
+exec /usr/bin/timeout "$@"
+''')
         executable(binaries / "curl", '''
 output='' format='' url=${!#}
-if [[ "$url" = */up && "$FIXTURE_HEALTH_STATUS" != 200 ]]; then exit 22; fi
+if [[ "$url" = */up* && "$FIXTURE_HEALTH_STATUS" != 200 ]]; then exit 22; fi
 while [ "$#" -gt 0 ]; do
   case "$1" in --output) output=$2; shift ;; --write-out) format=$2; shift ;; esac
   shift
@@ -126,6 +148,8 @@ if [[ "$url" = *'_deploy-php-check-'* ]]; then
 elif [[ "$url" = */application-proof ]]; then
   if [ "$FIXTURE_PROOF" = 1 ]; then answer=application-fixture-healthy; else answer='<html>HTTP200 error page</html>'; fi
   mime=text/plain
+elif [[ "$url" = */up* && "$FIXTURE_HEALTH_TEXT" = 1 ]]; then
+  answer='<html>Application up</html>'; mime=text/html
 else
   answer='<html>HTTP200 error page</html>'; mime=text/html
 fi
@@ -176,8 +200,9 @@ answer=$(curl --fail --silent "$DEPLOY_SITE_URL/application-proof")
 
         context = {
             "github.sha": COMMIT, "inputs.deployment-mode": mode, "inputs.deploy-dir": "app",
-            "inputs.site-url": "https://example.test", "inputs.health-path": "/up" if health else "",
+            "inputs.site-url": "https://example.test", "inputs.health-path": ("/up?token=SECRET_QUERY" if health_query else "/up") if health else "",
             "inputs.verification-script": str(verifier_file) if verifier else "",
+            "inputs.health-expect": health_expect,
             "inputs.verify-web-php": "true" if web else "false", "inputs.php-version": "8.5",
             "inputs.web-memory-limit": "invalid" if php == 2 else "1024M", "inputs.artisan-memory-limit": "256M",
             "inputs.atomic-layout": layout, "steps.ssh.outputs.target": "fixture",
@@ -216,15 +241,16 @@ answer=$(curl --fail --silent "$DEPLOY_SITE_URL/application-proof")
                                        cwd=root, text=True, capture_output=True)
                 log += retry.stdout + retry.stderr
                 assert retry.returncode == 0, log
-        assert "SECRET" not in log, log
+        assert "SECRET" not in log and "ignored null byte" not in log, log
         serving = not (home / "app/storage/framework/down").exists()
-        preserved = proof and verifier and health and health_status == 200 and php == 1 and web
+        health_proved = health and health_status == 200 and (not health_expect or health_text) and not health_ssh_stall and not health_ssh_oversized and not health_metadata
+        preserved = proof and verifier and health_proved and php == 1 and web
         expected_serving = success or preserved or mode == "in-place"
         assert serving == expected_serving, (name, success, serving, log)
         if mode == "atomic":
             assert not (home / ".deployments/app/deploy.lock").exists(), log
             assert (root / "crontab").read_text() != "" if serving else (root / "crontab").read_text() == "", log
-            qualified = proof and verifier and health and health_status == 200 and (not web or php in [0, 1])
+            qualified = proof and verifier and health_proved and (not web or php in [0, 1])
             assert (before_finalize.get("served_healthy", "false").strip() == "true") == qualified, log
             if preserved:
                 assert before_finalize.get("served_healthy", "").strip() == "true", log
@@ -233,6 +259,10 @@ answer=$(curl --fail --silent "$DEPLOY_SITE_URL/application-proof")
             elif not success:
                 assert before_finalize.get("served_healthy", "false").strip() != "true", log
         events = trace.read_text().splitlines() if trace.exists() else []
+        if health and not health_proved:
+            assert "application-verification" not in events and "probe" not in events, (events, log)
+        if health_ssh_stall:
+            assert events.count("health-ssh-budget=20") == 4, (events, log)
         marker_events = [i for i, event in enumerate(events) if "mark-healthy " in event and "unmark-healthy " not in event]
         if marker_events and web:
             assert marker_events[0] > max(i for i, event in enumerate(events) if event == "probe"), events
@@ -249,7 +279,14 @@ if __name__ == "__main__":
     for layout in ["stable-directory", "release-symlink"]:
         case(f"verified app/inconclusive PHP stays serving ({layout})", layout=layout)
         case(f"wrong PHP returns maintenance ({layout})", php=3, layout=layout)
-    case("HTTP200 HTML without verifier never preserves", verifier=False)
+    case("HTTP200 HTML without verifier never preserves", verifier=False, health_expect="", health_text=False)
+    case("default health text rejects HTTP200 HTML before app verification and PHP", health_text=False)
+    case("stalled health SSH is bounded on all four actual attempts", health_ssh_stall=True)
+    case("oversized health SSH body never passes the actual health gate", health_ssh_oversized=True)
+    case("trusted health query succeeds with credentials omitted from logs", health_query=True, php=0)
+    case("NUL in health SSH metadata never passes the actual health gate", health_metadata="nul")
+    case("invalid health metadata status never leaks its payload", health_metadata="secret")
+    case("unterminated health metadata never passes the actual health gate", health_metadata="unterminated")
     case("HTTP200 HTML with failed app proof never preserves", proof=False)
     case("wrong PHP remains definitive when revocation SSH fails", php=3, unmark_failure=True)
     case("invalid PHP probe input never preserves", php=2)

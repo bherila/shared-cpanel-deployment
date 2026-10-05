@@ -74,7 +74,7 @@ implicit behavior change.
 | `ssh-alias` | `cpanel-deploy` | Returned as the `ssh-target` output for your own steps. Every call through the alias shares one multiplexed connection (`ControlMaster auto`, `ControlPersist 15m`), so a deploy authenticates once instead of tripping a host's per-source connection-rate limit partway through. |
 | **Application** | | |
 | `deploy-dir` | required | Plain directory name under the account home. Never a webroot. |
-| `site-url` | required | https URL whose host names the site for the health and PHP checks. Both are fetched from the host's own web server under that name (`curl --resolve` to its own addresses, over SSH), not through any proxy or CDN in front of it, so a proxy rule that challenges the runner's location cannot answer for the application. |
+| `site-url` | required | https URL whose host names the site for the health and PHP checks. Each origin request has one deadline covering SSH, local address discovery and HTTP. Both are fetched from the host's own web server under that name (`curl --resolve` to its own addresses, over SSH), not through any proxy or CDN in front of it, so a proxy rule that challenges the runner's location cannot answer for the application. |
 | `php-version` | `8.5` | Web handler, CLI binary and the PHP check. |
 | `php-binary` | `/opt/cpanel/ea-php85/root/usr/bin/php` | Derived from `php-version`. cPanel's default `php` is older. |
 | `deployment-mode` | `atomic` | Safe v2 versioned releases. `in-place` is the explicit v1 escape hatch. |
@@ -126,9 +126,9 @@ implicit behavior change.
 | `operational-audit` | `false` | Bounded read-only migration and aggregate queue audits; backlog need not be empty. |
 | `runtime-audit` | `false` | Canonical runtime paths before serving and serving/lock/inventory/database proof after finalization; atomic stable-directory only. |
 | `post-finalize-script` | — | Runner-side read-only diagnostic after successful finalization, with finalizer `DEPLOY_*` status. |
-| `health-path` | `/up` | Empty skips. |
-| `health-expect` | `Application up` | Text the health body must contain; empty accepts any 2xx. A proxy's challenge or error page is a 2xx too, so keep it set. |
-| `verify-web-php` | `true` | |
+| `health-path` | `/up` | Empty skips. Paths with a query are fetched only from the domain’s cPanel binding; missing bindings fail without sending credentials to fallback vhosts. Query values are omitted from health logs. |
+| `health-expect` | `Application up` | Complete origin response bodies are limited to 256 KiB; PHP runtime records are limited to 512 bytes. Text the health body must contain; empty accepts any 2xx. A proxy's challenge or error page is a 2xx too, so keep it set. |
+| `verify-web-php` | `true` | The fetch retry budget is 75 seconds including SSH and host discovery. Probe creation and cleanup each have a separate 20-second SSH bound. Complete wrong-runtime responses fail definitively; HTML from another host address is skipped. |
 | `verification-script` | — | Runner-side live checks after `artisan up`, with deployment details in `DEPLOY_*`. |
 
 Outputs: `ssh-target`, `php-binary`, `release-id`, `live-release`, `live-commit` and `live-state`.
@@ -284,11 +284,18 @@ Every successfully finalized failure becomes retention-eligible; cleanup preserv
 the prior release and genuinely incomplete transactions.
 
 Initialization prepares unique private lock, transaction and candidate directories before publishing
-canonical names. The complete exclusive owner and lock inode are retained before no-clobber publication;
-another writer's canonical directory can never supply the acquired identity. Failures before upload
+canonical names. Every owner/start/timeout and transaction record is built with exclusive, descriptor-bound
+writes through its held private directory. Publication verifies each file inode and the exact regular
+inventory; canonical names never supply adopted identities. Ownership checks read the owner through a
+held directory and finish by rechecking its canonical inode. Metadata inventory records identities
+observed after exclusive creation inside invocation-private 0700 directories. These checks assume
+competing deploys respect those private directories; they cannot exclude arbitrary writes by other
+processes with the same account credentials. Failures before upload
 clean up only proven directories from this invocation. Cleanup detaches each directory inside its
-original parent without allocating new directories or metadata files, then removes flat metadata
-through a working directory bound to its verified inode. It never recursively deletes a pathname:
+original parent without allocating new directories or metadata files, then removes only metadata with
+recorded creation identities through a working directory bound to its verified inode. Unknown entries
+retain the blocker. The canonical lock remains held through all candidate/transaction cleanup; a second
+evidence scan after acquisition refuses waiters whose initial scan preceded a cleanup failure. It never recursively deletes a pathname:
 replacement releases, transaction payloads and owner records remain untouched. Final `rmdir` can only
 remove an empty directory; POSIX does not offer an inode-conditional empty-directory removal.
 
@@ -297,6 +304,13 @@ lock and recovery evidence for deliberate inspection. An incomplete owner before
 private; later `begin` refuses hidden `.begin-cleanup-*` evidence in control, releases or state until
 it has been inspected and deliberately recovered. A persistent metadata-allocation failure does not
 prevent cleanup when ownership is proven.
+
+For an exact managed real stable directory left in file maintenance with no lock and
+an empty transaction-state directory, the separate [orphan recovery action and runbook](recover-orphan/README.md)
+provide an explicitly confirmed operation. Normal deployment continues refusing
+intentional maintenance. Recovery keeps application cron paused, owns the canonical
+lock through cache preparation and application serving verification, and can restore
+the exact saved maintenance bytes without bootstrapping Laravel after interruption.
 
 ## What the guards refuse
 
@@ -477,9 +491,12 @@ migration; incompatible schema risk correctly leaves the old selected code down.
 shellcheck scripts/*.sh
 bash scripts/test-atomic-release.sh
 bash scripts/test-atomic-begin-cleanup.sh
+python3 scripts/test-atomic-begin-waiter.py
 bash scripts/test-action-contract.sh
 bash scripts/test-no-process-substitution.sh
 python3 scripts/test-live-verification.py
+bash scripts/test-recover-orphan.sh
+bash scripts/test-recover-orphan-contract.sh
 bash scripts/test-install-cron.sh
 bash scripts/test-prepare-cron-lines.sh
 bash scripts/test-rsync-atomic-release.sh
@@ -495,6 +512,11 @@ bash scripts/test-operational-audit.sh
 bash scripts/test-ensure-passport-keys.sh
 bash scripts/test-install-branding.sh
 ```
+
+The real Laravel 12/13 harness also runs the orphan recovery integration against its
+temporary managed application, including actual local HTTP application identity,
+generated cache isolation, direct rollback with broken bootstrap, and a later normal
+deployment. Never run its deliberately failed migration scenario against production.
 
 Release by tagging `vX.Y.Z`; callers pin the tag's commit SHA.
 

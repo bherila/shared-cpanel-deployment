@@ -2,9 +2,11 @@
 # Exercise origin-fetch.sh: own-address fallback, output framing and input validation.
 set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
+bash "$here/assert-no-process-substitution.sh" "$here/origin-fetch.sh"
 fixture=$(mktemp -d)
 trap 'rm -rf "$fixture"' EXIT
 export FIXTURE="$fixture"
+actual_curl=$(command -v curl)
 mkdir "$fixture/bin"
 cat >"$fixture/bin/hostname" <<'MOCK'
 #!/usr/bin/env bash
@@ -20,6 +22,7 @@ cat >"$fixture/bin/curl" <<'MOCK'
 set -euo pipefail
 while [ "$#" -gt 0 ]; do
     case $1 in
+        https://*) printf '%s\n' "$1" >>"$FIXTURE/urls" ;;
         --output) output=$2; shift ;;
         --resolve) resolve=$2; printf '%s\n' "$2" >>"$FIXTURE/resolves"; shift ;;
         --insecure) touch "$FIXTURE/insecure" ;;
@@ -31,6 +34,8 @@ case $resolve in
     *:192.0.2.10) printf '000|'; exit 7 ;;
     *:203.0.113.5) printf 'Application up, then the transfer stalled' >"$output"; printf '200|text/html'; exit 28 ;;
     *:203.0.113.9) printf 'default vhost' >"$output"; printf '200|text/html' ;;
+    *:203.0.113.21) printf '8.5|1024M|litespeed' >"$output"; printf '200|text/plain' ;;
+    *:203.0.113.22) printf '8.4|128M|litespeed' >"$output"; printf '200|text/plain' ;;
     *:203.0.113.20) printf 'Application up' >"$output"; printf '200|text/html' ;;
     *:203.0.113.30) sleep 2; printf '000|'; exit 28 ;;
     *:198.51.100.7) printf 'line one\nline two' >"$output"; printf '200|text/plain' ;;
@@ -103,8 +108,22 @@ MOCK
 bash "$here/origin-fetch.sh" site.example.test:8443 /up 5 >/dev/null
 [ "$(cat "$fixture/resolves")" = site.example.test:8443:127.0.0.1 ] || fail 'an explicit port is resolved on that port'
 echo 'ok - an explicit port is kept'
+printf '203.0.113.20' >"$fixture/vhost-ip"
+: >"$fixture/resolves"
 bash "$here/origin-fetch.sh" site.example.test '/up?token=abc&x=1' 5 >/dev/null || fail 'a query string in the path is accepted'
-echo 'ok - a query string is kept'
+[[ $(cat "$fixture/resolves") == site.example.test:443:203.0.113.20 ]] || fail 'query uses only the domain binding'
+echo 'ok - a query string is kept only on the trusted cPanel binding'
+# Even a wrong response on that binding must not disclose the query to fallback
+# vhosts; with no trusted binding, do not send any HTTP request at all.
+printf '203.0.113.9' >"$fixture/vhost-ip"
+: >"$fixture/resolves"; : >"$fixture/urls"
+bash "$here/origin-fetch.sh" site.example.test '/up?token=SECRET_QUERY' 5 'Application up' >/dev/null
+[[ $(wc -l <"$fixture/resolves") == 1 && $(cat "$fixture/resolves") == site.example.test:443:203.0.113.9 ]] || fail 'query must never fallback after an unacceptable bound response'
+rm "$fixture/vhost-ip"
+: >"$fixture/resolves"; : >"$fixture/urls"
+out=$(bash "$here/origin-fetch.sh" site.example.test '/up?token=SECRET_QUERY' 5 'Application up')
+[[ ! -s $fixture/resolves && ! -s $fixture/urls && $(tail -n1 <<<"$out") == 'ORIGIN-META 000|' ]] || fail 'query without trusted binding must not disclose credentials'
+echo 'ok - credential query never reaches unrelated host addresses or loopback'
 
 for bad in 'bad host!' 'site.example.test'; do
     path=/up
@@ -117,3 +136,47 @@ for bad in 'bad host!' 'site.example.test'; do
 done
 if bash "$here/origin-fetch.sh" site.example.test /up 0 >/dev/null 2>&1; then fail 'rejects a zero time limit'; fi
 echo 'ok - invalid host, path and time limit are refused'
+
+# PHP mode skips complete HTML from the wrong vhost, while preserving a valid
+# wrong runtime so the runner can report a definitive failure rather than hide it.
+for runtime_address in 203.0.113.21 203.0.113.22; do
+    printf '#!/usr/bin/env bash\nprintf "203.0.113.9 %s\\n"\n' "$runtime_address" >"$fixture/bin/hostname"
+    : >"$fixture/resolves"
+    out=$(bash "$here/origin-fetch.sh" site.example.test /probe.php 5 '' php-runtime)
+    [[ $(wc -l <"$fixture/resolves") == 2 ]] || fail 'PHP mode must try the later runtime address'
+    expected='8.5|1024M|litespeed'
+    [[ $runtime_address != 203.0.113.22 ]] || expected='8.4|128M|litespeed'
+    [[ $(sed '$d' <<<"$out") == "$expected" ]] || fail 'complete runtime returned without filtering requirements'
+done
+echo 'ok - PHP mode skips wrong-vhost HTML and retains well-formed wrong runtime'
+
+# The deadline starts before local discovery. No network fetch starts after a
+# hung cPanel API or hostname command consumes the one-second budget.
+for discovery in uapi hostname; do
+    printf '#!/usr/bin/env bash\nexit 0\n' >"$fixture/bin/uapi"
+    printf '#!/usr/bin/env bash\nexit 0\n' >"$fixture/bin/hostname"
+    printf '#!/usr/bin/env bash\nsleep 30\n' >"$fixture/bin/$discovery"
+    : >"$fixture/resolves"
+    started=$SECONDS
+    out=$(bash "$here/origin-fetch.sh" site.example.test /up 1 2>"$fixture/discovery-error")
+    (( SECONDS - started < 4 )) || fail "$discovery discovery exceeded its deadline"
+    [[ ! -s $fixture/resolves && $(tail -n1 <<<"$out") == 'ORIGIN-META 000|' ]] || fail 'expired discovery must not fetch'
+done
+echo 'ok - stalled cPanel and hostname discovery share the whole call deadline'
+
+# Filesystem/quota failures must not claim a response was retained or emitted.
+printf '#!/usr/bin/env bash\nexit 0\n' >"$fixture/bin/uapi"
+printf '#!/usr/bin/env bash\nexit 0\n' >"$fixture/bin/hostname"
+printf '#!/usr/bin/env bash\nexit 1\n' >"$fixture/bin/cp"
+chmod +x "$fixture/bin/cp"
+if bash "$here/origin-fetch.sh" site.example.test /up 5 >"$fixture/copy-failure" 2>/dev/null; then fail 'failed response copy must fail'; fi
+if grep -Fq ORIGIN-META "$fixture/copy-failure"; then fail 'failed copy claimed response metadata'; fi
+rm "$fixture/bin/cp"
+printf '#!/usr/bin/env bash\nprintf PRIVATE_READ_FAILURE\nexit 1\n' >"$fixture/bin/cat"
+chmod +x "$fixture/bin/cat"
+if bash "$here/origin-fetch.sh" site.example.test /up 5 >"$fixture/read-failure" 2>/dev/null; then fail 'failed response read must fail'; fi
+if grep -Fq ORIGIN-META "$fixture/read-failure"; then fail 'failed read claimed response metadata'; fi
+rm "$fixture/bin/cat"
+echo 'ok - failed response copy or final read never appends a success record'
+
+ORIGIN_REAL_CURL="$actual_curl" python3 "$here/test-origin-response-limits.py"

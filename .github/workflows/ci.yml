@@ -45,6 +45,9 @@ jobs:
       - name: Atomic initialization fault and ownership harness
         run: bash scripts/test-atomic-begin-cleanup.sh
 
+      - name: Coordinated initialization cleanup waiters
+        run: python3 scripts/test-atomic-begin-waiter.py
+
       - name: rsync-atomic-release.sh harness
         run: bash scripts/test-rsync-atomic-release.sh
 
@@ -56,6 +59,17 @@ jobs:
 
       - name: composite live verification and healthy preservation harness
         run: python3 scripts/test-live-verification.py
+
+      - name: explicit orphan maintenance recovery harness
+        run: bash scripts/test-recover-orphan.sh
+
+      - name: explicit orphan recovery action and transport contract
+        run: bash scripts/test-recover-orphan-contract.sh
+
+      - name: recovery PHP helper syntax
+        run: |
+          php -l scripts/recover-orphan-state.php
+          php -l scripts/recover-orphan-framework.php
 
       - name: read-only application preflight hook harness
         run: bash scripts/test-run-preflight-hook.sh
@@ -121,8 +135,8 @@ jobs:
           status=0
           while IFS= read -r script; do
             [ -f "$script" ] || { echo "::error file=action.yml::$script does not exist"; status=1; }
-          done < <(grep -o 'scripts/[A-Za-z0-9._-]*\.sh' action.yml | sort -u)
+          done < <(grep -ho 'scripts/[A-Za-z0-9._-]*\.sh' action.yml recover-orphan/action.yml | sort -u)
           exit "$status"
 
       - name: action.yml is valid YAML
-        run: ruby -ryaml -e 'YAML.load_file("action.yml")'
+        run: ruby -ryaml -e 'YAML.load_file("action.yml"); YAML.load_file("recover-orphan/action.yml")'

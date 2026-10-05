@@ -43,19 +43,29 @@ esac
 
 # Bytes for a php.ini size ("1024M", "1G", "536870912"); -1 for unlimited; empty when unparseable.
 to_bytes() {
-    local value=$1
-    case $value in
-        -1) echo -1 ;;
-        *[0-9][Gg]) echo $(( ${value%[Gg]} * 1073741824 )) ;;
-        *[0-9][Mm]) echo $(( ${value%[Mm]} * 1048576 )) ;;
-        *[0-9][Kk]) echo $(( ${value%[Kk]} * 1024 )) ;;
-        ''|*[!0-9]*) echo '' ;;
-        *) echo "$value" ;;
+    local value=$1 multiplier=1 digits maximum LC_ALL=C
+    [[ ${#value} -le 512 ]] || { echo ''; return; }
+    if [[ $value == -1 ]]; then echo -1; return; fi
+    [[ $value =~ ^([0-9]+)([KkMmGg]?)$ ]] || { echo ''; return; }
+    digits=${BASH_REMATCH[1]}
+    case ${BASH_REMATCH[2]} in
+        [Gg]) multiplier=1073741824 ;;
+        [Mm]) multiplier=1048576 ;;
+        [Kk]) multiplier=1024 ;;
     esac
+    digits=${digits#"${digits%%[!0]*}"}
+    digits=${digits:-0}
+    maximum=$(( 9223372036854775807 / multiplier ))
+    # Equal-length decimal strings compare without risking numeric overflow.
+    # shellcheck disable=SC2071
+    if [[ ${#digits} -gt ${#maximum} || ( ${#digits} -eq ${#maximum} && $digits > $maximum ) ]]; then
+        echo ''; return
+    fi
+    echo $(( 10#$digits * multiplier ))
 }
 
 minimum=$(to_bytes "$want_memory")
-if [ -z "$minimum" ] || [ "$minimum" = -1 ]; then
+if [ -z "$minimum" ] || [ "$minimum" = -1 ] || [ "$minimum" = 0 ]; then
     echo "::error::The minimum memory_limit '$want_memory' is not a positive php.ini size." >&2
     exit 2
 fi
@@ -85,7 +95,7 @@ remote="$app_dir/public/$name"
 # empty array as unset under `set -u`. $remote is expanded here on purpose; $HOME on the host.
 remote_ssh() {
     # shellcheck disable=SC2029
-    ssh ${ssh_options[@]+"${ssh_options[@]}"} "$target" "$1"
+    timeout --signal=KILL 20s ssh ${ssh_options[@]+"${ssh_options[@]}"} "$target" "$1"
 }
 
 cleanup() {
@@ -111,7 +121,6 @@ PHP
 # with an HTML 200 for several seconds, which three tries two seconds apart did not outlast.
 response_file=$(mktemp)
 raw_file=$(mktemp)
-runtime_pattern='^[0-9]+\.[0-9]+\|(-1|[0-9]+[KkMmGg]?)\|[A-Za-z0-9_-]+$'
 delays=(2 3 5 8 10 12 15)
 attempts=$(( ${#delays[@]} + 1 ))
 # One deadline for the whole window, not just the sleeps: a host that accepts and then stalls
@@ -121,16 +130,31 @@ deadline=$(( SECONDS + window ))
 for (( attempt = 1; attempt <= attempts; attempt++ )); do
     request_limit=$(( deadline - SECONDS ))
     (( request_limit <= 20 )) || request_limit=20
-    (( request_limit >= 5 )) || request_limit=5
+    if (( request_limit <= 0 )); then
+        echo "::error::The web PHP probe could not fetch the PHP runtime fields after $(( attempt - 1 )) attempts in ${window}s (deadline exhausted); this response does not establish a PHP version." >&2
+        exit 1
+    fi
     # shellcheck disable=SC2029
-    if ssh ${ssh_options[@]+"${ssh_options[@]}"} "$target" \
-        "bash -s -- $(printf '%q ' "$site_host" "$site_path/$name" "$request_limit")" \
+    if (ulimit -f 512; timeout --signal=KILL "${request_limit}s" ssh ${ssh_options[@]+"${ssh_options[@]}"} "$target" \
+        "bash -s -- $(printf '%q ' "$site_host" "$site_path/$name" "$request_limit" '' php-runtime)") \
         <"$here/origin-fetch.sh" >"$raw_file" 2>/dev/null \
+        && [[ $(wc -c <"$raw_file") -le 263168 ]] \
+        && tail -c 1 "$raw_file" | od -An -tu1 | grep -Eq '^[[:space:]]*10[[:space:]]*$' \
+        && LC_ALL=C awk 'END { if (NR == 0 || length($0) > 512 \
+            || $0 !~ /^ORIGIN-META [0-9][0-9][0-9]\|[[:print:]]*$/) exit 1 }' "$raw_file" \
         && response_meta=$(sed -n '$s/^ORIGIN-META //p' "$raw_file") && [ -n "$response_meta" ]; then
         sed '$d' "$raw_file" >"$response_file"
         if [[ ${response_meta%%|*} =~ ^2[0-9][0-9]$ ]]; then
-            answer=$(<"$response_file")
-            if [[ $answer =~ $runtime_pattern ]]; then
+            # sed removed the metadata line but preserves its leading framing
+            # newline. Validate the complete file before shell substitution can
+            # discard NULs or trailing newlines from a malformed last answer.
+            if [[ $(wc -c <"$response_file") -le 513 ]] && LC_ALL=C awk '
+                NR == 1 && $0 !~ /^[0-9]+\.[0-9]+\|(-1|[0-9]+[KkMmGg]?)\|[A-Za-z0-9_-]+$/ { invalid=1 }
+                NR == 2 && $0 != "" { invalid=1 }
+                NR > 2 { invalid=1 }
+                END { if (NR < 1 || invalid) exit 1 }
+            ' "$response_file"; then
+                answer=$(<"$response_file")
                 break
             fi
             reason='did not return the PHP runtime fields'

@@ -4,7 +4,15 @@
 set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 scratch=$(mktemp -d)
-trap 'rm -rf "$scratch"' EXIT
+finish() {
+    local status=$?
+    if [ "$status" -ne 0 ]; then
+        echo "Failed initialization fixture: ${FAULT_COMMAND:-setup} ${FAULT_FIELD:-none} ${REPLACE:-none}" >&2
+        if [ -n "${fixture:-}" ] && [ -f "$fixture/output" ]; then tail -20 "$fixture/output" >&2; fi
+    fi
+    rm -rf "$scratch"
+}
+trap finish EXIT
 original_path=$PATH
 real_mktemp=$(command -v mktemp)
 real_mv=$(command -v mv)
@@ -37,13 +45,15 @@ inject_fault() {
         malformed) builtin printf 'failed\n\n' >"$HOME/.deployments/app/deploy.lock/owner" ;;
         missing) rm "$HOME/.deployments/app/deploy.lock/owner" ;;
         candidate)
-            command mv "$HOME/.deployments/app/releases/failed" "$FIXTURE_ROOT/original-candidate"
-            mkdir "$HOME/.deployments/app/releases/failed"
-            touch "$HOME/.deployments/app/releases/failed/foreign" ;;
+            candidate_sources=("$HOME/.deployments/app/releases"/.begin-cleanup-acquire.*-candidate)
+            command mv "${candidate_sources[0]}" "$FIXTURE_ROOT/original-candidate"
+            mkdir "${candidate_sources[0]}"
+            touch "${candidate_sources[0]}/foreign" ;;
         transaction)
-            command mv "$HOME/.deployments/app/state/failed" "$FIXTURE_ROOT/original-transaction"
-            mkdir "$HOME/.deployments/app/state/failed"
-            touch "$HOME/.deployments/app/state/failed/foreign" ;;
+            transaction_sources=("$HOME/.deployments/app/state"/.begin-cleanup-acquire.*-transaction)
+            command mv "${transaction_sources[0]}" "$FIXTURE_ROOT/original-transaction"
+            mkdir "${transaction_sources[0]}"
+            touch "${transaction_sources[0]}/foreign" ;;
         control|releases|state)
             case $REPLACE in
                 control) replaced="$HOME/.deployments/app" ;;
@@ -58,8 +68,10 @@ inject_fault() {
 matches_field() {
     case $1 in
         "$HOME/.deployments/app/state/failed/$FAULT_FIELD"|"$HOME/.deployments/app/state/failed/.$FAULT_FIELD."*|"$HOME/.deployments/app/$FAULT_FIELD"|"$HOME/.deployments/app/.$FAULT_FIELD."*|"$HOME/.deployments/app/deploy.lock/$FAULT_FIELD"|"$HOME/.deployments/app/.begin-cleanup-acquire."*"/$FAULT_FIELD") return 0 ;;
-        *) return 1 ;;
+        "$HOME/.deployments/app/.begin-cleanup-acquire."*"/.$FAULT_FIELD."*|"$HOME/.deployments/app/state/.begin-cleanup-acquire."*"/$FAULT_FIELD"|"$HOME/.deployments/app/state/.begin-cleanup-acquire."*"/.$FAULT_FIELD."*) return 0 ;;
+        "./$FAULT_FIELD"|"./.$FAULT_FIELD."*) case $PWD in "$HOME/.deployments/app"/.begin-cleanup-acquire.*|"$HOME/.deployments/app/state"/.begin-cleanup-acquire.*) return 0 ;; esac ;;
     esac
+    return 1
 }
 printf() {
     local target process_id=$BASHPID
@@ -68,11 +80,33 @@ printf() {
     builtin printf "$@"
 }
 mktemp() {
+    if [ "$FAULT_COMMAND" = open ] && matches_field "${!#}"; then
+        builtin printf 'hit\n' >"$FIXTURE_ROOT/hit"
+        # Deny creation in the held private directory. Cleanup restores this
+        # fixture's write permission before removing already-proven metadata.
+        command chmod 500 .
+    fi
     if [ "$FAULT_COMMAND" = persistent-mktemp ] && { matches_field "${!#}" || [ -f "$FIXTURE_ROOT/hit" ]; }; then inject_fault; return 91; fi
     if [ "$FAULT_COMMAND" = mktemp ] && matches_field "${!#}"; then inject_fault; return 91; fi
     "$REAL_MKTEMP" "$@"
 }
+cmp() {
+    if [ "$FAULT_COMMAND" = owner-window ] && [ "$PWD" = "$HOME/.deployments/app/deploy.lock" ] && [ "${@: -2:1}" = ./owner ] && [ ! -f "$FIXTURE_ROOT/hit" ]; then
+        builtin printf 'hit\n' >"$FIXTURE_ROOT/hit"
+        command mv "$HOME/.deployments/app/deploy.lock" "$FIXTURE_ROOT/original-owner-window"
+        command mkdir "$HOME/.deployments/app/deploy.lock"
+        builtin printf 'failed\n' >"$HOME/.deployments/app/deploy.lock/owner"
+        builtin printf 'foreign started\n' >"$HOME/.deployments/app/deploy.lock/started"
+        builtin printf 'foreign timeout\n' >"$HOME/.deployments/app/deploy.lock/requested-timeout"
+    fi
+    command cmp "$@"
+}
 stat() {
+    if [ "$FAULT_COMMAND" = temp-symlink ] && [[ ${!#} == ./.persistent-paths.* ]] && [ ! -f "$FIXTURE_ROOT/hit" ]; then
+        builtin printf 'hit\n' >"$FIXTURE_ROOT/hit"
+        command mv "${!#}" "$FIXTURE_ROOT/held-original-temp"
+        command ln -s "$FIXTURE_ROOT/unrelated" "${!#}"
+    fi
     if [ "$FAULT_COMMAND" = lock-stat ] && [ "${!#}" = "$HOME/.deployments/app/deploy.lock" ] && [ ! -f "$FIXTURE_ROOT/hit" ]; then
         builtin printf 'hit\n' >"$FIXTURE_ROOT/hit"
         command mv "$HOME/.deployments/app/deploy.lock" "$FIXTURE_ROOT/original-acquired-lock"
@@ -103,6 +137,7 @@ swap_cleanup() {
     [ "$boundary" != lock ] || builtin printf 'replacement\n' >"$target/owner"
 }
 rm() {
+    if [ "$FAULT_COMMAND" = open ] && [ -f "$FIXTURE_ROOT/hit" ]; then command chmod 700 .; fi
     case ${REPLACE:-none}:$PWD in
         rm-transaction:*/.begin-cleanup-*-transaction|rm-lock:*/.begin-cleanup-*-lock)
             if [ ! -f "$FIXTURE_ROOT/removal-hit" ]; then swap_cleanup "$PWD" "${REPLACE#rm-}"; fi ;;
@@ -118,6 +153,14 @@ rmdir() {
 }
 chmod() {
     local target=${!#}
+    if [[ $FAULT_COMMAND == metadata-symlink || $FAULT_COMMAND == metadata-foreign ]] && [[ $target == "$HOME/.deployments/app/state/.begin-cleanup-acquire."*-transaction ]]; then
+        builtin printf 'hit\n' >"$FIXTURE_ROOT/hit"
+        if [ "$FAULT_COMMAND" = metadata-symlink ]; then
+            command ln -s "$FIXTURE_ROOT/unrelated" "$target/persistent-paths"
+        else
+            builtin printf 'foreign payload\n' >"$target/foreign"
+        fi
+    fi
     if [ "$FAULT_COMMAND" = prepublish-lock ]; then
         case "$FAULT_FIELD:$target" in
             transaction:"$HOME/.deployments/app/state/.begin-cleanup-acquire."*-transaction|candidate:"$HOME/.deployments/app/releases/.begin-cleanup-acquire."*-candidate) inject_fault || true ;;
@@ -157,12 +200,7 @@ mv() {
                     if [ ! -f "$FIXTURE_ROOT/detach-hit" ]; then
                         touch "$FIXTURE_ROOT/detach-hit"
                         if [[ $REPLACE == detach-* ]]; then
-                            path="$HOME/.deployments/app/$boundary"
-                            case $boundary in
-                                candidate) path="$HOME/.deployments/app/releases/failed" ;;
-                                transaction) path="$HOME/.deployments/app/state/failed" ;;
-                                lock) path="$HOME/.deployments/app/deploy.lock" ;;
-                            esac
+                            path=${@: -2:1}
                             command mv "$path" "$FIXTURE_ROOT/original-detached"
                             mkdir "$path"
                             touch "$path/foreign"
@@ -214,6 +252,26 @@ for field in persistent-paths started requested-timeout; do
     run_fault
     assert_reacquire
 done
+# Initial exclusive temporaries add allocation/publication boundaries for
+# persistent paths and all lock records, before canonical publication.
+for field in persistent-paths started requested-timeout; do
+    for command in mktemp mv; do
+        setup
+        export FAULT_COMMAND="$command" FAULT_FIELD="$field" REPLACE=none
+        run_fault
+        assert_reacquire
+    done
+done
+# Exclusive creation may fail before any field contents exist. Existing owner
+# proof permits cleanup; an incomplete first owner remains deliberate evidence.
+if [ "$(id -u)" -ne 0 ]; then
+    for field in "${fields[@]}" persistent-paths started requested-timeout; do
+        setup
+        export FAULT_COMMAND=open FAULT_FIELD="$field" REPLACE=none
+        run_fault
+        assert_reacquire
+    done
+fi
 # Generation publication and the legacy trusted-commit record also belong to
 # initialization, including temporary contents and final renames.
 for field in generation legacy-live-commit; do
@@ -239,13 +297,15 @@ for replacement in lock same-token owner malformed missing candidate transaction
     export FAULT_COMMAND=mv FAULT_FIELD=phase REPLACE="$replacement"
     run_fault
     test -d "$HOME/.deployments/app/deploy.lock"
-    test -d "$HOME/.deployments/app/state/failed"
-    test -d "$HOME/.deployments/app/releases/failed"
+    transaction_sources=("$HOME/.deployments/app/state"/.begin-cleanup-acquire.*-transaction)
+    candidate_sources=("$HOME/.deployments/app/releases"/.begin-cleanup-acquire.*-candidate)
+    test -d "${transaction_sources[0]}"
+    test -d "${candidate_sources[0]}"
     case $replacement in
         lock|owner) test "$(cat "$HOME/.deployments/app/deploy.lock/owner")" = replacement ;;
         same-token) test "$(cat "$HOME/.deployments/app/deploy.lock/owner")" = failed ;;
-        candidate) test -f "$HOME/.deployments/app/releases/failed/foreign" ;;
-        transaction) test -f "$HOME/.deployments/app/state/failed/foreign" ;;
+        candidate) test -f "${candidate_sources[0]}/foreign" ;;
+        transaction) test -f "${transaction_sources[0]}/foreign" ;;
     esac
     if bash "$here/atomic-release.sh" begin app retry "$commit" 7200 3 maintenance "$commit" stable-directory storage >/dev/null 2>&1; then exit 1; fi
     checks=$((checks + 1))
@@ -258,8 +318,10 @@ setup
 export FAULT_COMMAND=persistent-mv FAULT_FIELD=phase REPLACE=none
 run_fault
 test -d "$HOME/.deployments/app/deploy.lock"
-test -d "$HOME/.deployments/app/state/failed"
-test -d "$HOME/.deployments/app/releases/failed"
+transaction_sources=("$HOME/.deployments/app/state"/.begin-cleanup-acquire.*-transaction)
+candidate_sources=("$HOME/.deployments/app/releases"/.begin-cleanup-acquire.*-candidate)
+test -d "${transaction_sources[0]}"
+test -d "${candidate_sources[0]}"
 checks=$((checks + 1))
 
 for field in transaction candidate; do
@@ -270,7 +332,8 @@ for field in transaction candidate; do
     if [ "$field" = transaction ]; then
         partial_sources=("$HOME/.deployments/app/state"/.begin-cleanup-acquire.*-transaction)
     else
-        test -d "$HOME/.deployments/app/state/failed"
+        transaction_sources=("$HOME/.deployments/app/state"/.begin-cleanup-acquire.*-transaction)
+        test -d "${transaction_sources[0]}"
         partial_sources=("$HOME/.deployments/app/releases"/.begin-cleanup-acquire.*-candidate)
     fi
     test -d "${partial_sources[0]}"
@@ -306,7 +369,7 @@ for replacement in control releases state; do
     run_fault
     case $replacement in
         control) test -f "$fixture/original-ancestor/deploy.lock/owner" ;;
-        *) test -d "$fixture/original-ancestor/failed" ;;
+        *) original_sources=("$fixture/original-ancestor"/.begin-cleanup-acquire.*); test -d "${original_sources[0]}" ;;
     esac
     test -f "$HOME/.deployments/app/$(case $replacement in control) echo foreign ;; *) echo "$replacement/foreign" ;; esac)"
     [ "$replacement" = control ] || test -d "$HOME/.deployments/app/deploy.lock"
@@ -323,6 +386,16 @@ test -d "${private_sources[0]}"
 test ! -s "${private_sources[0]}/owner"
 if bash "$here/atomic-release.sh" begin app retry "$commit" 7200 3 maintenance "$commit" stable-directory storage >/dev/null 2>&1; then exit 1; fi
 checks=$((checks + 1))
+for command in mktemp mv; do
+    setup
+    export FAULT_COMMAND="$command" FAULT_FIELD=owner REPLACE=none
+    run_fault
+    test ! -e "$HOME/.deployments/app/deploy.lock"
+    private_sources=("$HOME/.deployments/app"/.begin-cleanup-acquire.*)
+    test -d "${private_sources[0]}"
+    if bash "$here/atomic-release.sh" begin app retry "$commit" 7200 3 maintenance "$commit" stable-directory storage >/dev/null 2>&1; then exit 1; fi
+    checks=$((checks + 1))
+done
 # Replace the canonical lock exactly as its identity is first checked. The
 # prepared source identity must not adopt or overwrite the replacement owner.
 setup
@@ -350,6 +423,30 @@ for field in transaction candidate; do
         transaction) test ! -e "$HOME/.deployments/app/state/failed" ;;
         candidate) test ! -e "$HOME/.deployments/app/releases/failed" ;;
     esac
+    checks=$((checks + 1))
+done
+# The owner is checked through a held inode before the final canonical check.
+setup
+export FAULT_COMMAND=owner-window FAULT_FIELD=none REPLACE=none
+run_fault
+test "$(cat "$HOME/.deployments/app/deploy.lock/owner")" = failed
+test "$(cat "$HOME/.deployments/app/deploy.lock/started")" = 'foreign started'
+test "$(cat "$HOME/.deployments/app/deploy.lock/requested-timeout")" = 'foreign timeout'
+checks=$((checks + 1))
+# Inject a field symlink, replace the open temporary name with a symlink, or add
+# unknown regular payload. No outside file may be overwritten or payload erased.
+for fault in metadata-symlink temp-symlink metadata-foreign; do
+    setup
+    printf 'unrelated account payload\n' >"$fixture/unrelated"
+    export FAULT_COMMAND="$fault" FAULT_FIELD=none REPLACE=none
+    run_fault
+    test "$(cat "$fixture/unrelated")" = 'unrelated account payload'
+    test -d "$HOME/.deployments/app/deploy.lock"
+    if [ "$fault" = metadata-foreign ]; then
+        transaction_sources=("$HOME/.deployments/app/state"/.begin-cleanup-*-transaction)
+        test "$(cat "${transaction_sources[0]}/foreign")" = 'foreign payload'
+    fi
+    if bash "$here/atomic-release.sh" begin app retry "$commit" 7200 3 maintenance "$commit" stable-directory storage >/dev/null 2>&1; then exit 1; fi
     checks=$((checks + 1))
 done
 # Replace each detached path as the deletion command itself starts. Flat
