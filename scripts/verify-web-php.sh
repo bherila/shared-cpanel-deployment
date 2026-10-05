@@ -14,6 +14,10 @@
 #
 # Fails the deploy when the web handler runs a different PHP major.minor than <php-version>, or a
 # `memory_limit` below <min-memory-limit> (for example 1024M; -1, unlimited, satisfies any minimum).
+#
+# Exit status: 0 verified; 1 inconclusive (no well-formed answer within the window); 2 usage;
+# 3 definitive (the handler answered, and its runtime is wrong). A deploy may keep a healthy
+# release serving through an inconclusive probe, never through a definitive one.
 set -euo pipefail
 
 if [ "$#" -lt 5 ]; then
@@ -136,17 +140,17 @@ echo "Web handler: PHP $php, memory_limit=$memory, SAPI $sapi."
 
 if [ "$php" != "$want_php" ]; then
     echo "::error::The web handler runs PHP '$php', not $want_php. Check the cPanel handler block appended to public/.htaccess." >&2
-    exit 1
+    exit 3
 fi
 
 actual=$(to_bytes "$memory")
 if [ -z "$actual" ]; then
     echo "::error::The web handler reported an unreadable memory_limit '$memory'." >&2
-    exit 1
+    exit 3
 fi
 
 if [ "$actual" != -1 ] && [ "$actual" -lt "$minimum" ]; then
     echo "::error::The web handler's memory_limit is $memory, below the required $want_memory. On LiteSpeed set" \
          "'php_value memory_limit $want_memory' inside '<IfModule LiteSpeed>' in public/.htaccess; .user.ini is ignored there." >&2
-    exit 1
+    exit 3
 fi

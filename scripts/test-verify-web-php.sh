@@ -96,6 +96,6 @@ WEB_PHP_PROBE_WINDOW=0 run_case 'an exhausted window stops retrying' 1 1 html ht
 grep -q 'after 1 attempts in 0s' "$probe_fixture/log"
 WEB_PHP_PROBE_WINDOW=soon run_case 'a malformed window is refused' 2 0 '8.5|1024M|litespeed'
 run_case 'a title longer than a pipe buffer keeps retrying' 0 3 longtitle longtitle '8.5|1024M|litespeed'
-run_case 'well-formed wrong PHP fails immediately' 1 1 '8.4|1024M|litespeed' '8.5|1024M|litespeed'
-run_case 'insufficient memory fails immediately' 1 1 '8.5|128M|litespeed' '8.5|1024M|litespeed'
+run_case 'well-formed wrong PHP fails immediately and definitively' 3 1 '8.4|1024M|litespeed' '8.5|1024M|litespeed'
+run_case 'insufficient memory fails immediately and definitively' 3 1 '8.5|128M|litespeed' '8.5|1024M|litespeed'
 run_case 'extra fields and multiline content fail closed' 1 8 '8.5|1024M|litespeed|extra' multiline '8.5|bogus|litespeed'

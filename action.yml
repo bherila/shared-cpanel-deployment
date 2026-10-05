@@ -1196,7 +1196,20 @@ runs:
         SITE_URL: ${{ inputs.site-url }}
         PHP_VERSION_WANTED: ${{ inputs.php-version }}
         MIN_MEMORY: ${{ inputs.web-memory-limit || '128M' }}
-      run: bash "$GITHUB_ACTION_PATH/scripts/verify-web-php.sh" "$TARGET" "$DEPLOY_DIR" "$SITE_URL" "$PHP_VERSION_WANTED" "$MIN_MEMORY"
+        DEPLOYMENT_MODE: ${{ inputs.deployment-mode }}
+        RELEASE_ID: ${{ steps.resolve.outputs.release-id }}
+      run: |
+        set -uo pipefail
+        status=0
+        bash "$GITHUB_ACTION_PATH/scripts/verify-web-php.sh" "$TARGET" "$DEPLOY_DIR" "$SITE_URL" "$PHP_VERSION_WANTED" "$MIN_MEMORY" || status=$?
+        # 3 is definitive: the handler answered with the wrong runtime. A healthy
+        # release is kept serving only through an inconclusive probe, so withdraw
+        # the mark and let failure-policy apply.
+        if [ "$status" -eq 3 ] && [ "$DEPLOYMENT_MODE" = atomic ]; then
+          ssh "$TARGET" "bash -s -- $(printf '%q ' unmark-healthy "$DEPLOY_DIR" "$RELEASE_ID")" \
+            <"$GITHUB_ACTION_PATH/scripts/atomic-release.sh" || status=1
+        fi
+        exit "$status"
 
     - id: atomic-live-status
       name: Read the selected atomic release status

@@ -1124,6 +1124,18 @@ mark_healthy() {
     echo "Release $release_id served and passed its health check."
 }
 
+# Withdraw the healthy mark: the web handler answered with the wrong runtime,
+# which is a definitive failure, not a flaky one, so failure-policy applies.
+unmark_healthy() {
+    if [ "$#" -ne 0 ]; then
+        echo "usage: ... unmark-healthy <app> <release>" >&2
+        exit 2
+    fi
+    require_owner
+    write_value served_healthy false
+    echo "Release $release_id is no longer marked healthy; failure-policy applies."
+}
+
 commit_release() {
     if [ "$#" -lt 1 ] || [ "$#" -gt 2 ]; then
         echo "usage: ... commit <app> <release> <php> [memory-limit]" >&2
@@ -1501,6 +1513,7 @@ case $command in
     serve) serve "$@" ;;
     restore-cron) restore_cron_command "$@" ;;
     mark-healthy) mark_healthy "$@" ;;
+    unmark-healthy) unmark_healthy "$@" ;;
     commit) commit_release "$@" ;;
     finalize) finalize "$@" ;;
     status) [ "$#" -le 2 ] || exit 2; report_status "${1:-}" "${2:-}" ;;

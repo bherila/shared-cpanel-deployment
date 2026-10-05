@@ -430,6 +430,15 @@ bash "$script" finalize app marked-then-down "$php" >/dev/null 2>&1
 check "a marked candidate that went down returns to maintenance" test "$(status_field marked-then-down live_state)" = maintenance
 check "a marked candidate that went down has cron paused" test ! -s "$CRONTAB_FILE"
 
+# A definitive runtime mismatch withdraws the mark: maintenance applies as before.
+setup; make_legacy; begin_and_upload wrong-runtime; preflight_quiesce wrong-runtime; bash "$script" prepare app wrong-runtime "$php" >/dev/null
+bash "$script" risk app wrong-runtime "$php" >/dev/null; bash "$script" activate app wrong-runtime "$php" >/dev/null
+bash "$script" serve app wrong-runtime "$php" >/dev/null; bash "$script" restore-cron app wrong-runtime >/dev/null
+bash "$script" mark-healthy app wrong-runtime >/dev/null; bash "$script" unmark-healthy app wrong-runtime >/dev/null
+bash "$script" finalize app wrong-runtime "$php" >/dev/null 2>&1
+check "an unmarked candidate with a wrong runtime returns to maintenance" test "$(status_field wrong-runtime live_state)" = maintenance
+check "an unmarked candidate with a wrong runtime has cron paused" test ! -s "$CRONTAB_FILE"
+
 # The cPanel-compatible layout keeps the vhost application path real. Its two
 # activation renames are durably recoverable, and v2.0 symlink deployments can
 # migrate without changing the selected code or persistent state.
