@@ -1192,7 +1192,7 @@ runs:
         for attempt in 1 2 3 4; do
           status=unreachable
           found=no
-          if ssh "$TARGET" "bash -s -- $(printf '%q ' "$host" "$base$HEALTH_PATH" 20)" \
+          if ssh "$TARGET" "bash -s -- $(printf '%q ' "$host" "$base$HEALTH_PATH" 20 "$HEALTH_EXPECT")" \
               <"$GITHUB_ACTION_PATH/scripts/origin-fetch.sh" >"$raw" 2>/dev/null; then
             meta=$(sed -n '$s/^ORIGIN-META //p' "$raw")
             status=${meta%%|*}

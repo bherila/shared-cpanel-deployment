@@ -10,6 +10,11 @@ cat >"$fixture/bin/hostname" <<'MOCK'
 #!/usr/bin/env bash
 [ "${1:-}" = -I ] && printf '192.0.2.10 fe80::1 198.51.100.7 \n'
 MOCK
+cat >"$fixture/bin/uapi" <<'MOCK'
+#!/usr/bin/env bash
+[ -f "$FIXTURE/vhost-ip" ] || exit 1
+printf -- '---\nresult:\n  data:\n    ip: %s\n    ipv6: ~\n' "$(cat "$FIXTURE/vhost-ip")"
+MOCK
 cat >"$fixture/bin/curl" <<'MOCK'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -24,6 +29,8 @@ done
 case $resolve in
     *:192.0.2.10) printf '000|'; exit 7 ;;
     *:203.0.113.5) printf 'Application up, then the transfer stalled' >"$output"; printf '200|text/html'; exit 28 ;;
+    *:203.0.113.9) printf 'default vhost' >"$output"; printf '200|text/html' ;;
+    *:203.0.113.20) printf 'Application up' >"$output"; printf '200|text/html' ;;
     *:198.51.100.7) printf 'line one\nline two' >"$output"; printf '200|text/plain' ;;
     *) printf 'loopback' >"$output"; printf '200|text/plain' ;;
 esac
@@ -51,6 +58,26 @@ out=$(bash "$here/origin-fetch.sh" site.example.test /up 5)
 [ "$(tail -n1 <<<"$out")" = 'ORIGIN-META 200|text/plain' ] && [ "$(sed '$d' <<<"$out")" = $'line one\nline two' ] \
     || fail 'a transfer curl reports as failed is not accepted on its status'
 echo 'ok - a 2xx header followed by a failed transfer is no answer'
+
+# On a multi-IP host another address can serve a different vhost: cPanel's own binding for the
+# site is tried first, and an answer lacking the expected text moves on to the next address.
+: >"$fixture/resolves"
+printf '203.0.113.20' >"$fixture/vhost-ip"
+cat >"$fixture/bin/hostname" <<'MOCK'
+#!/usr/bin/env bash
+[ "${1:-}" = -I ] && printf '203.0.113.9 203.0.113.20\n'
+MOCK
+out=$(bash "$here/origin-fetch.sh" site.example.test /up 5 'Application up')
+[ "$(head -n1 "$fixture/resolves")" = site.example.test:443:203.0.113.20 ] || fail "cPanel's vhost address is tried first"
+[ "$(sed '$d' <<<"$out")" = 'Application up' ] || fail 'the vhost address answers'
+rm -f "$fixture/vhost-ip"; : >"$fixture/resolves"
+out=$(bash "$here/origin-fetch.sh" site.example.test /up 5 'Application up')
+[ "$(cat "$fixture/resolves")" = $'site.example.test:443:203.0.113.9\nsite.example.test:443:203.0.113.20' ] \
+    || fail 'an answer without the expected text moves on to the next address'
+[ "$(sed '$d' <<<"$out")" = 'Application up' ] || fail 'the address with the expected text wins'
+out=$(bash "$here/origin-fetch.sh" site.example.test /up 5 'never present')
+[ "$(tail -n1 <<<"$out")" = 'ORIGIN-META 200|text/plain' ] || fail 'with no match, the last answer is reported'
+echo 'ok - the vhost binding comes first and a wrong vhost is skipped'
 
 for bad in 'bad host!' 'site.example.test'; do
     path=/up
