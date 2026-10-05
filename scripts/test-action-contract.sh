@@ -28,6 +28,7 @@ health_expect_default=$(awk '$1 == "health-expect:" { found=1 } found && $1 == "
 check "health requires Laravel's /up text by default" test "$health_expect_default" = 'Application up'
 check "the health check is fetched from the origin, not through the proxy" grep -Fq 'scripts/origin-fetch.sh" >"$raw"' "$action"
 check "the health check no longer curls the public URL from the runner" bash -c '! grep -Fq -- "\"\${SITE_URL%/}\$HEALTH_PATH\"" "$1"' _ "$action"
+check "the health text is matched in a file, not at the end of a pipe" grep -Fq 'grep -Fq -- "$HEALTH_EXPECT" "$body"' "$action"
 check "the web PHP probe is fetched from the origin" grep -Fq 'origin-fetch.sh' "$here/scripts/verify-web-php.sh"
 check "legacy in-place mode remains an explicit branch" grep -Fq "inputs.deployment-mode == 'in-place'" "$action"
 check "the selected atomic layout is persisted with the remote transaction" grep -Fq '"$ATOMIC_LAYOUT" "${paths[@]}"' "$action"

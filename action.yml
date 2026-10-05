@@ -1188,7 +1188,8 @@ runs:
         # zone rule that challenges the runner's location answers with its own 2xx page, which
         # once counted as healthy without reaching the application (2026-10-05).
         raw=$(mktemp)
-        trap 'rm -f "$raw"' EXIT
+        body=$(mktemp)
+        trap 'rm -f "$raw" "$body"' EXIT
         for attempt in 1 2 3 4; do
           status=unreachable
           found=no
@@ -1196,7 +1197,10 @@ runs:
               <"$GITHUB_ACTION_PATH/scripts/origin-fetch.sh" >"$raw" 2>/dev/null; then
             meta=$(sed -n '$s/^ORIGIN-META //p' "$raw")
             status=${meta%%|*}
-            if [ -z "$HEALTH_EXPECT" ] || sed '$d' "$raw" | grep -Fq -- "$HEALTH_EXPECT"; then found=yes; fi
+            # Into a file first: grep -q closing a pipe early would SIGPIPE sed on a large page and,
+            # under pipefail, reject a healthy response.
+            sed '$d' "$raw" >"$body"
+            if [ -z "$HEALTH_EXPECT" ] || grep -Fq -- "$HEALTH_EXPECT" "$body"; then found=yes; fi
             if [[ $status =~ ^2[0-9][0-9]$ ]] && [ "$found" = yes ]; then
               echo "Healthy: $SITE_URL$HEALTH_PATH (HTTP $status from the origin)"
               exit 0
