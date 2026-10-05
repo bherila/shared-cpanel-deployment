@@ -80,9 +80,15 @@ PHP
 # A proxy or newly reloaded web handler can return an HTML page with HTTP 200. curl's HTTP
 # retries do not catch that. Retry missing/malformed responses, but a real runtime that does
 # not meet the application's requirements must fail immediately below.
+#
+# The window is about a minute, with backoff: on LiteSpeed the request that follows a change
+# under public/ (a rewritten .htaccess handler, a swapped stable directory) has been answered
+# with an HTML 200 for several seconds, which three tries two seconds apart did not outlast.
 response_file=$(mktemp)
 runtime_pattern='^[0-9]+\.[0-9]+\|(-1|[0-9]+[KkMmGg]?)\|[A-Za-z0-9_-]+$'
-for attempt in 1 2 3; do
+delays=(2 3 5 8 10 12 15)
+attempts=$(( ${#delays[@]} + 1 ))
+for (( attempt = 1; attempt <= attempts; attempt++ )); do
     if response_meta=$(curl --fail --silent --show-error --max-time 20 \
         --header 'Cache-Control: no-cache' --output "$response_file" \
         --write-out '%{http_code}|%{content_type}' "$site_url/$name"); then
@@ -96,15 +102,18 @@ for attempt in 1 2 3; do
     fi
     IFS='|' read -r http_status content_type <<<"$response_meta"
     # Never print the body: an intermediary/error page might contain unrelated sensitive data.
-    # Ignore arbitrary response header text as well; display only a recognizable MIME type.
+    # Ignore arbitrary response header text as well; display only a recognizable MIME type, and
+    # of an HTML page only its <title>, reduced to plain words, to say what answered instead.
     content_type=${content_type%%;*}
     [[ $content_type =~ ^[A-Za-z0-9.+-]+/[A-Za-z0-9.+-]+$ ]] || content_type=unknown
-    if [ "$attempt" -eq 3 ]; then
-        echo "::error::The web PHP probe $reason after 3 attempts (HTTP $http_status, content-type $content_type). Check the site's document root, rewrite rules, and proxy/WAF routing; this response does not establish a PHP version." >&2
+    title=$(tr '\n\r' '  ' <"$response_file" 2>/dev/null | sed -n 's/.*<[Tt][Ii][Tt][Ll][Ee][^>]*>\([^<]*\)<.*/\1/p' | head -c 200 | tr -cd 'A-Za-z0-9 .,:()-' | cut -c1-80)
+    detail="HTTP $http_status, content-type $content_type${title:+, title \"$title\"}"
+    if [ "$attempt" -eq "$attempts" ]; then
+        echo "::error::The web PHP probe $reason after $attempts attempts ($detail). Check the site's document root, rewrite rules, and proxy/WAF routing; this response does not establish a PHP version." >&2
         exit 1
     fi
-    echo "::warning::The web PHP probe $reason (HTTP $http_status, content-type $content_type); retrying ($attempt/3)." >&2
-    sleep 2
+    echo "::warning::The web PHP probe $reason ($detail); retrying in ${delays[attempt-1]}s ($attempt/$attempts)." >&2
+    sleep "${delays[attempt-1]}"
 done
 IFS='|' read -r php memory sapi <<<"$answer"
 
