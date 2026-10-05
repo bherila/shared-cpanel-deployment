@@ -38,7 +38,9 @@ expect=${4:-}
 [[ $authority =~ ^([A-Za-z0-9.-]+)(:([0-9]{1,5}))?$ ]] || { echo "origin-fetch: invalid host" >&2; exit 2; }
 host=${BASH_REMATCH[1]}
 port=${BASH_REMATCH[3]:-443}
-[[ $path =~ ^/[A-Za-z0-9._~/%-]*$ ]] || { echo "origin-fetch: invalid path" >&2; exit 2; }
+# Path and optional query, in URL characters only (no quotes, spaces or shell syntax): a health
+# path such as /up?token=abc worked when it was part of the runner's URL and still must.
+[[ $path =~ ^/[A-Za-z0-9._~/%-]*(\?[A-Za-z0-9._~/%=\&+-]*)?$ ]] || { echo "origin-fetch: invalid path" >&2; exit 2; }
 if ! [[ $limit =~ ^[0-9]+$ ]] || [ "$limit" -eq 0 ]; then
     echo "origin-fetch: invalid time limit" >&2
     exit 2

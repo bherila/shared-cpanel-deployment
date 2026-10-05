@@ -101,6 +101,8 @@ MOCK
 bash "$here/origin-fetch.sh" site.example.test:8443 /up 5 >/dev/null
 [ "$(cat "$fixture/resolves")" = site.example.test:8443:127.0.0.1 ] || fail 'an explicit port is resolved on that port'
 echo 'ok - an explicit port is kept'
+bash "$here/origin-fetch.sh" site.example.test '/up?token=abc&x=1' 5 >/dev/null || fail 'a query string in the path is accepted'
+echo 'ok - a query string is kept'
 
 for bad in 'bad host!' 'site.example.test'; do
     path=/up
