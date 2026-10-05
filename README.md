@@ -98,6 +98,15 @@ Pin the action to a full commit SHA. The job holds a key that reaches every appl
 
 Outputs: `ssh-target` (the alias) and `php-binary`.
 
+The web PHP check requires the temporary probe's exact runtime response. Fetch failures and
+malformed responses (including HTTP 200 HTML pages from routing or intermediary errors) get up to eight
+attempts with backoff under one 75-second deadline and a maximum 20 seconds per request. A valid response with
+the wrong PHP version or insufficient memory fails immediately. Malformed-response diagnostics show
+the HTTP status, the MIME type and, for an HTML page, a short SHA-256 of its title, never the response
+body; check document-root and proxy routing if the probe never returns its fields. The probe is
+fetched from the host's own web server over SSH (`scripts/origin-fetch.sh`), not from the runner
+through the public URL. The temporary remote probe and local response file are removed on exit.
+
 ## What the guards refuse
 
 **Upload** (`scripts/rsync-deploy.sh`). `--delete` removes whatever the upload does not contain, and the
@@ -196,6 +205,7 @@ bash scripts/test-prepare-cron-lines.sh
 bash scripts/test-rsync-deploy.sh
 bash scripts/test-rsync-migrations.sh
 bash scripts/test-htaccess.sh
+bash scripts/test-verify-web-php.sh
 bash scripts/test-origin-fetch.sh
 bash scripts/test-configure-env.sh
 bash scripts/test-assert-no-pending-migrations.sh
