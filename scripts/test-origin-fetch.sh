@@ -56,8 +56,9 @@ cat >"$fixture/bin/hostname" <<'MOCK'
 [ "${1:-}" = -I ] && printf '203.0.113.5 198.51.100.7\n'
 MOCK
 out=$(bash "$here/origin-fetch.sh" site.example.test /up 5)
-[ "$(tail -n1 <<<"$out")" = 'ORIGIN-META 200|text/plain' ] && [ "$(sed '$d' <<<"$out")" = $'line one\nline two' ] \
-    || fail 'a transfer curl reports as failed is not accepted on its status'
+if [ "$(tail -n1 <<<"$out")" != 'ORIGIN-META 200|text/plain' ] || [ "$(sed '$d' <<<"$out")" != $'line one\nline two' ]; then
+    fail 'a transfer curl reports as failed is not accepted on its status'
+fi
 echo 'ok - a 2xx header followed by a failed transfer is no answer'
 
 # On a multi-IP host another address can serve a different vhost: cPanel's own binding for the
