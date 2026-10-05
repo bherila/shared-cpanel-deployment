@@ -63,7 +63,7 @@ run_case() {
     rm -f "$probe_fixture/count" "$probe_fixture/cleaned"
     printf '%s\n' "$@" >"$probe_fixture/responses"
     local status=0
-    bash "$here/verify-web-php.sh" fake-host app https://example.invalid 8.5 1024M \
+    bash "$here/verify-web-php.sh" fake-host app "${site_url:-https://example.invalid}" 8.5 1024M \
         >"$probe_fixture/log" 2>&1 || status=$?
     local requests=0
     [ ! -f "$probe_fixture/count" ] || requests=$(<"$probe_fixture/count")
@@ -91,6 +91,8 @@ run_case 'valid runtime passes' 0 1 '8.5|1024M|litespeed'
 # HTML 200. The probe is fetched from the host's web server under the site's name instead.
 grep -Eq '^example\.invalid:443:127\.0\.0\.1$' "$probe_fixture/resolve"
 grep -Eq '^https://example\.invalid/_deploy-php-check-[0-9a-f]{32}\.php$' "$probe_fixture/url"
+site_url=https://example.invalid:443 run_case 'a site URL with an explicit port is accepted' 0 1 '8.5|1024M|litespeed'
+grep -Eq '^example\.invalid:443:127\.0\.0\.1$' "$probe_fixture/resolve"
 run_case 'a non-2xx origin answer is retried as a failed fetch' 0 2 notfound '8.5|1024M|litespeed'
 run_case 'HTTP 200 HTML retries and recovers' 0 2 html '8.5|1G|litespeed'
 run_case 'transport failure retries and recovers' 0 2 transport '8.5|-1|fpm-fcgi'

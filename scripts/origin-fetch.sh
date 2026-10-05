@@ -4,7 +4,7 @@
 #
 # Runs ON THE HOST, piped over SSH:
 #
-#   ssh <target> "bash -s -- <host> <path> <max-seconds> [expected-text]" <origin-fetch.sh
+#   ssh <target> "bash -s -- <host[:port]> <path> <max-seconds> [expected-text]" <origin-fetch.sh
 #
 # Deploy checks used to fetch through the public URL from the runner. A zone rule that challenges
 # visitors by country (Cloudflare "I'm Under Attack" for non-US traffic) answered those requests
@@ -26,16 +26,18 @@
 set -uo pipefail
 
 if [ "$#" -lt 3 ] || [ "$#" -gt 4 ]; then
-    echo "usage: origin-fetch.sh <host> <path> <max-seconds> [expected-text]" >&2
+    echo "usage: origin-fetch.sh <host[:port]> <path> <max-seconds> [expected-text]" >&2
     exit 2
 fi
 
-host=$1
+authority=$1
 path=$2
 limit=$3
 expect=${4:-}
 
-[[ $host =~ ^[A-Za-z0-9.-]+$ ]] || { echo "origin-fetch: invalid host" >&2; exit 2; }
+[[ $authority =~ ^([A-Za-z0-9.-]+)(:([0-9]{1,5}))?$ ]] || { echo "origin-fetch: invalid host" >&2; exit 2; }
+host=${BASH_REMATCH[1]}
+port=${BASH_REMATCH[3]:-443}
 [[ $path =~ ^/[A-Za-z0-9._~/%-]*$ ]] || { echo "origin-fetch: invalid path" >&2; exit 2; }
 if ! [[ $limit =~ ^[0-9]+$ ]] || [ "$limit" -eq 0 ]; then
     echo "origin-fetch: invalid time limit" >&2
@@ -72,10 +74,10 @@ for address in "${addresses[@]}"; do
     # A transfer curl reports as failed (timed out or cut off after a 2xx header) is no answer,
     # whatever status --write-out printed: a partial body must never pass a check.
     if ! meta=$(curl --silent --insecure --max-time "$remaining" \
-        --resolve "$host:443:$address" \
+        --resolve "$host:$port:$address" \
         --header 'Cache-Control: no-cache' \
         --output "$body" --write-out '%{http_code}|%{content_type}' \
-        "https://$host$path" 2>/dev/null); then
+        "https://$authority$path" 2>/dev/null); then
         meta='000|'
     fi
     [ "${meta%%|*}" != 000 ] || continue

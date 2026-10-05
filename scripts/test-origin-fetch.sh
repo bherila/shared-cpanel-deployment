@@ -91,6 +91,16 @@ out=$(bash "$here/origin-fetch.sh" site.example.test /up 2 'Application up')
 [ "$(tail -n1 <<<"$out")" = 'ORIGIN-META 000|' ] || fail 'a spent time limit reports no answer'
 echo 'ok - one time limit covers every address'
 
+# An explicit port in the site URL travels to --resolve and the URL.
+cat >"$fixture/bin/hostname" <<'MOCK'
+#!/usr/bin/env bash
+exit 0
+MOCK
+: >"$fixture/resolves"
+bash "$here/origin-fetch.sh" site.example.test:8443 /up 5 >/dev/null
+[ "$(cat "$fixture/resolves")" = site.example.test:8443:127.0.0.1 ] || fail 'an explicit port is resolved on that port'
+echo 'ok - an explicit port is kept'
+
 for bad in 'bad host!' 'site.example.test'; do
     path=/up
     if [ "$bad" = site.example.test ]; then

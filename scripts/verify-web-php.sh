@@ -71,7 +71,8 @@ site_rest=${site_url#https://}
 site_host=${site_rest%%/*}
 site_path=''
 [ "$site_rest" = "$site_host" ] || site_path=/${site_rest#*/}
-[[ $site_host =~ ^[A-Za-z0-9.-]+$ ]] || { echo "::error::The site URL has an invalid host." >&2; exit 2; }
+# site_host is the URL's authority, so an explicit port travels with it to origin-fetch.sh.
+[[ $site_host =~ ^[A-Za-z0-9.-]+(:[0-9]{1,5})?$ ]] || { echo "::error::The site URL has an invalid host." >&2; exit 2; }
 
 # The probe's overall retry window in seconds; see the retry loop below.
 window=${WEB_PHP_PROBE_WINDOW:-75}
