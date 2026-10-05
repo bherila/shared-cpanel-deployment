@@ -159,6 +159,7 @@ bash scripts/test-install-cron.sh
 bash scripts/test-rsync-deploy.sh
 bash scripts/test-htaccess.sh
 bash scripts/test-verify-web-php.sh
+bash scripts/test-origin-fetch.sh
 bash scripts/test-configure-env.sh
 bash scripts/test-assert-no-pending-migrations.sh
 ```
