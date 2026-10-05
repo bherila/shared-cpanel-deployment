@@ -55,6 +55,9 @@ jobs:
       - name: install-branding.sh harness
         run: bash scripts/test-install-branding.sh
 
+      - name: action.yml contract
+        run: bash scripts/test-action-contract.sh
+
       - name: action.yml references only scripts that exist
         run: |
           set -euo pipefail

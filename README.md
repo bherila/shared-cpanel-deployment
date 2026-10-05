@@ -60,7 +60,7 @@ Pin the action to a full commit SHA. The job holds a key that reaches every appl
 | `ssh-alias` | `cpanel-deploy` | Returned as the `ssh-target` output for your own steps. |
 | **Application** | | |
 | `deploy-dir` | required | Plain directory name under the account home. Never a webroot. |
-| `site-url` | required | https URL for the health and PHP checks. |
+| `site-url` | required | https URL whose host names the site for the health and PHP checks. Both are fetched from the host's own web server under that name (`curl --resolve` to its own addresses, over SSH), not through any proxy or CDN in front of it, so a proxy rule that challenges the runner's location cannot answer for the application. |
 | `php-version` | `8.5` | Web handler, CLI binary and the PHP check. |
 | `php-binary` | `/opt/cpanel/ea-php85/root/usr/bin/php` | Derived from `php-version`. cPanel's default `php` is older. |
 | **Upload** | | |
@@ -94,6 +94,7 @@ Pin the action to a full commit SHA. The job holds a key that reaches every appl
 | `extra-cron-lines` | — | Added alongside the scheduler line, same rules. Use this for queue workers; they inherit `cron-memory-limit` too. |
 | **Verification** | | |
 | `health-path` | `/up` | Empty skips. |
+| `health-expect` | `Application up` | Text the health body must contain; empty accepts any 2xx. A proxy's challenge or error page is a 2xx too, so keep it set. |
 | `verify-web-php` | `true` | |
 
 Outputs: `ssh-target` (the alias) and `php-binary`.
@@ -207,6 +208,7 @@ bash scripts/test-rsync-migrations.sh
 bash scripts/test-htaccess.sh
 bash scripts/test-verify-web-php.sh
 bash scripts/test-origin-fetch.sh
+bash scripts/test-action-contract.sh
 bash scripts/test-configure-env.sh
 bash scripts/test-assert-no-pending-migrations.sh
 bash scripts/test-remote-artisan.sh
