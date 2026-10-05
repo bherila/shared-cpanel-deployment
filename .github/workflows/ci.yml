@@ -69,3 +69,54 @@ jobs:
       - name: origin-fetch.sh harness
         run: bash scripts/test-origin-fetch.sh
 
+      - name: configure-env.sh harness
+        run: bash scripts/test-configure-env.sh
+
+      - name: assert-no-pending-migrations.sh harness
+        run: bash scripts/test-assert-no-pending-migrations.sh
+
+      - name: remote-artisan.sh harness
+        run: bash scripts/test-remote-artisan.sh
+
+      - name: operational-audit.sh harness
+        run: bash scripts/test-operational-audit.sh
+
+      - name: canonical runtime audit harness
+        run: bash scripts/test-runtime-audit.sh
+
+      - name: read-only post-finalizer hook harness
+        run: bash scripts/test-run-post-finalize-hook.sh
+
+      - name: ensure-passport-keys.sh harness
+        run: bash scripts/test-ensure-passport-keys.sh
+
+      - name: install-branding.sh harness
+        run: bash scripts/test-install-branding.sh
+
+      - name: Install OpenSSH server
+        run: |
+          if [ ! -x /usr/sbin/sshd ]; then
+            for attempt in 1 2 3; do
+              if sudo apt-get update -q \
+                && sudo apt-get install -y -q --no-install-recommends openssh-server; then
+                break
+              fi
+              [ "$attempt" = 3 ] && exit 1
+              sleep $((attempt * 10))
+            done
+          fi
+
+      - name: configure-ssh.sh real-transport harness
+        run: bash scripts/test-configure-ssh.sh
+
+      - name: action.yml references only scripts that exist
+        run: |
+          set -euo pipefail
+          status=0
+          while IFS= read -r script; do
+            [ -f "$script" ] || { echo "::error file=action.yml::$script does not exist"; status=1; }
+          done < <(grep -o 'scripts/[A-Za-z0-9._-]*\.sh' action.yml | sort -u)
+          exit "$status"
+
+      - name: action.yml is valid YAML
+        run: ruby -ryaml -e 'YAML.load_file("action.yml")'
