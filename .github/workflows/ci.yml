@@ -34,6 +34,9 @@ jobs:
       - name: htaccess.sh harness
         run: bash scripts/test-htaccess.sh
 
+      - name: origin-fetch.sh harness
+        run: bash scripts/test-origin-fetch.sh
+
       - name: configure-env.sh harness
         run: bash scripts/test-configure-env.sh
 
