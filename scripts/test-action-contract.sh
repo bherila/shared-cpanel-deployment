@@ -89,8 +89,17 @@ check "existing apps require an explicit quiescence policy" grep -Fq 'Existing a
 check "fresh installs never invoke the app quiesce hook" grep -Fq "steps.atomic-preflight.outputs.existing_release == 'true' && inputs.quiesce-script != ''" "$action"
 check "unmanaged cron has an explicit restoration phase" grep -Fq 'name: Restore unmanaged atomic cron lines' "$action"
 check "candidate and live release outputs are exposed" grep -Fq 'live-state:' "$action"
-check "remote atomic state machine does not require /dev/fd process substitution" sh -c \
-    '! grep -Fq '\''< <('\'' "$1"' sh "$here/scripts/atomic-release.sh"
+check "remote deployment scripts never require process substitution" bash \
+    "$here/scripts/assert-no-process-substitution.sh" \
+    "$here/scripts/atomic-release.sh" "$here/scripts/operational-audit.sh" \
+    "$here/scripts/remote-artisan.sh" "$here/scripts/assert-no-pending-migrations.sh" \
+    "$here/scripts/configure-env.sh" "$here/scripts/ensure-passport-keys.sh" \
+    "$here/scripts/ensure-webroot-symlink.sh" "$here/scripts/install-branding.sh" \
+    "$here/scripts/install-cron.sh"
+check "remote upload heredocs never require process substitution" bash \
+    "$here/scripts/assert-no-process-substitution.sh" --heredoc REMOTE \
+    "$here/scripts/rsync-deploy.sh" "$here/scripts/rsync-migrations.sh" \
+    "$here/scripts/rsync-atomic-release.sh"
 
 runtime=$(line_of 'name: Audit canonical selected runtime paths')
 final_runtime=$(line_of 'name: Audit finalized runtime and transaction state')
