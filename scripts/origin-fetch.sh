@@ -62,11 +62,16 @@ add_address 127.0.0.1
 
 meta='000|'
 kept_meta='000|'
+# <max-seconds> bounds the whole call, not each address: several addresses that accept and then
+# stall must not multiply it.
+deadline=$(( SECONDS + limit ))
 for address in "${addresses[@]}"; do
+    remaining=$(( deadline - SECONDS ))
+    [ "$remaining" -gt 0 ] || break
     : >"$body"
     # A transfer curl reports as failed (timed out or cut off after a 2xx header) is no answer,
     # whatever status --write-out printed: a partial body must never pass a check.
-    if ! meta=$(curl --silent --insecure --max-time "$limit" \
+    if ! meta=$(curl --silent --insecure --max-time "$remaining" \
         --resolve "$host:443:$address" \
         --header 'Cache-Control: no-cache' \
         --output "$body" --write-out '%{http_code}|%{content_type}' \

@@ -31,6 +31,7 @@ case $resolve in
     *:203.0.113.5) printf 'Application up, then the transfer stalled' >"$output"; printf '200|text/html'; exit 28 ;;
     *:203.0.113.9) printf 'default vhost' >"$output"; printf '200|text/html' ;;
     *:203.0.113.20) printf 'Application up' >"$output"; printf '200|text/html' ;;
+    *:203.0.113.30) sleep 2; printf '000|'; exit 28 ;;
     *:198.51.100.7) printf 'line one\nline two' >"$output"; printf '200|text/plain' ;;
     *) printf 'loopback' >"$output"; printf '200|text/plain' ;;
 esac
@@ -78,6 +79,17 @@ out=$(bash "$here/origin-fetch.sh" site.example.test /up 5 'Application up')
 out=$(bash "$here/origin-fetch.sh" site.example.test /up 5 'never present')
 [ "$(tail -n1 <<<"$out")" = 'ORIGIN-META 200|text/plain' ] || fail 'with no match, the last answer is reported'
 echo 'ok - the vhost binding comes first and a wrong vhost is skipped'
+
+# The time limit covers the whole call: once an address has used it up, no other is tried.
+: >"$fixture/resolves"
+cat >"$fixture/bin/hostname" <<'MOCK'
+#!/usr/bin/env bash
+[ "${1:-}" = -I ] && printf '203.0.113.30 203.0.113.20\n'
+MOCK
+out=$(bash "$here/origin-fetch.sh" site.example.test /up 2 'Application up')
+[ "$(cat "$fixture/resolves")" = site.example.test:443:203.0.113.30 ] || fail 'no address is tried after the time limit is spent'
+[ "$(tail -n1 <<<"$out")" = 'ORIGIN-META 000|' ] || fail 'a spent time limit reports no answer'
+echo 'ok - one time limit covers every address'
 
 for bad in 'bad host!' 'site.example.test'; do
     path=/up
