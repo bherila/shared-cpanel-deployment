@@ -283,6 +283,28 @@ and remote processes have stopped, an operator must recover/remove an abandoned 
 Every successfully finalized failure becomes retention-eligible; cleanup preserves the live release,
 the prior release and genuinely incomplete transactions.
 
+Initialization prepares unique private lock, transaction and candidate directories before publishing
+canonical names. Every owner/start/timeout and transaction record is built with exclusive, descriptor-bound
+writes through its held private directory. Publication verifies each file inode and the exact regular
+inventory; canonical names never supply adopted identities. Ownership checks read the owner through a
+held directory and finish by rechecking its canonical inode. Metadata inventory records identities
+observed after exclusive creation inside invocation-private 0700 directories. These checks assume
+competing deploys respect those private directories; they cannot exclude arbitrary writes by other
+processes with the same account credentials. Failures before upload
+clean up only proven directories from this invocation. Cleanup detaches each directory inside its
+original parent without allocating new directories or metadata files, then removes only metadata with
+recorded creation identities through a working directory bound to its verified inode. Unknown entries
+retain the blocker. The canonical lock remains held through all candidate/transaction cleanup; a second
+evidence scan after acquisition refuses waiters whose initial scan preceded a cleanup failure. It never recursively deletes a pathname:
+replacement releases, transaction payloads and owner records remain untouched. Final `rmdir` can only
+remove an empty directory; POSIX does not offer an inode-conditional empty-directory removal.
+
+Changed ancestors, replacement directories, an incomplete owner record, or failed cleanup retain the
+lock and recovery evidence for deliberate inspection. An incomplete owner before publication remains
+private; later `begin` refuses hidden `.begin-cleanup-*` evidence in control, releases or state until
+it has been inspected and deliberately recovered. A persistent metadata-allocation failure does not
+prevent cleanup when ownership is proven.
+
 For an exact managed real stable directory left in file maintenance with no lock and
 an empty transaction-state directory, the separate [orphan recovery action and runbook](recover-orphan/README.md)
 provide an explicitly confirmed operation. Normal deployment continues refusing
@@ -468,6 +490,8 @@ migration; incompatible schema risk correctly leaves the old selected code down.
 ```sh
 shellcheck scripts/*.sh
 bash scripts/test-atomic-release.sh
+bash scripts/test-atomic-begin-cleanup.sh
+python3 scripts/test-atomic-begin-waiter.py
 bash scripts/test-action-contract.sh
 bash scripts/test-no-process-substitution.sh
 python3 scripts/test-live-verification.py

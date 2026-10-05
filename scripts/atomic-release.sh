@@ -680,6 +680,173 @@ capacity() {
     write_value phase capacity_checked
 }
 
+# Initialization has not touched application runtime data. If any write fails,
+# release only the directories created by this invocation. Inode identities
+# distinguish replacement owners even when an operator reuses the release id.
+begin_directory_matches() {
+    local path=$1 identity=$2
+    [ -n "$identity" ] && [ -d "$path" ] && [ ! -L "$path" ] \
+        && [ "$(stat -c '%d:%i' -- "$path")" = "$identity" ]
+}
+
+begin_ancestors_match() {
+    begin_directory_matches "$HOME/.deployments" "$begin_root_identity" \
+        && begin_directory_matches "$control" "$begin_control_identity" \
+        && begin_directory_matches "$releases" "$begin_releases_identity" \
+        && begin_directory_matches "$state_root" "$begin_state_identity"
+}
+
+begin_lock_matches() (
+    begin_ancestors_match || exit 1
+    cd -P -- "$lock" || exit 1
+    begin_directory_matches . "$begin_lock_identity" \
+        && [ -f ./owner ] && [ ! -L ./owner ] \
+        && printf '%s\n' "$release_id" | cmp -s -- ./owner - || exit 1
+    begin_ancestors_match && begin_directory_matches "$lock" "$begin_lock_identity"
+)
+
+# Initial metadata uses exclusive creation while cwd holds its private inode.
+# Later phases retain the ordinary overwrite API in write_value.
+begin_write_value() {
+    local name=$1 temporary leaf descriptor identity
+    shift
+    temporary=$(mktemp -u "$begin_metadata_root/.${name}.XXXXXX")
+    leaf=${temporary##*/}
+    set -C
+    exec {descriptor}>"./$leaf"
+    set +C
+    identity=$(stat -c '%d:%i' -- "./$leaf")
+    if [ "$begin_metadata_kind" = lock ]; then
+        begin_owned_lock_metadata[$leaf]=$identity
+    else
+        begin_owned_metadata[$leaf]=$identity
+    fi
+    printf '%s\n' "$@" >&"$descriptor"
+    exec {descriptor}>&-
+    [ -f "./$leaf" ] && [ ! -L "./$leaf" ] \
+        && [ "$(stat -c '%d:%i' -- "./$leaf")" = "$identity" ] || exit 1
+    mv -T -n -- "./$leaf" "./$name"
+    [ ! -e "./$leaf" ] && [ ! -L "./$leaf" ] \
+        && [ -f "./$name" ] && [ ! -L "./$name" ] \
+        && [ "$(stat -c '%d:%i' -- "./$name")" = "$identity" ] \
+        && printf '%s\n' "$@" | cmp -s -- "./$name" - || exit 1
+    if [ "$begin_metadata_kind" = lock ]; then
+        begin_owned_lock_metadata[$name]=$identity
+        unset 'begin_owned_lock_metadata[$leaf]'
+    else
+        begin_owned_metadata[$name]=$identity
+        unset 'begin_owned_metadata[$leaf]'
+    fi
+}
+
+begin_metadata_inventory() (
+    local path=$1 identity=$2 kind=$3 entry leaf expected
+    cd -P -- "$path" || exit 1
+    begin_directory_matches . "$identity" || exit 1
+    shopt -s nullglob dotglob
+    local entries=(./*)
+    if [ "$kind" = lock ]; then
+        [ "${#entries[@]}" -eq 3 ] || exit 1
+    else
+        [ "${#entries[@]}" -eq "${#begin_owned_metadata[@]}" ] || exit 1
+    fi
+    for entry in "${entries[@]}"; do
+        leaf=${entry#./}
+        [[ $leaf =~ ^[A-Za-z0-9._-]+$ ]] || exit 1
+        [ -f "$entry" ] && [ ! -L "$entry" ] || exit 1
+        if [ "$kind" = lock ]; then expected=${begin_owned_lock_metadata[$leaf]:-}; else expected=${begin_owned_metadata[$leaf]:-}; fi
+        [ -n "$expected" ] && [ "$(stat -c '%d:%i' -- "$entry")" = "$expected" ] || exit 1
+        case $leaf in .*) exit 1 ;; esac
+    done
+    begin_ancestors_match && begin_directory_matches "$path" "$identity"
+)
+
+# A held working directory anchors flat metadata removal to the proven inode.
+# Never recursively remove a pathname: a replacement release may appear there
+# after an identity check. rmdir can only remove an empty directory.
+begin_remove_directory() (
+    local path=$1 identity=$2 kind=$3 entry leaf expected
+    cd -P -- "$path" || exit 1
+    begin_ancestors_match && begin_directory_matches . "$identity" || exit 1
+    shopt -s nullglob dotglob
+    local entries=(./*)
+    if [ "$kind" = candidate ]; then
+        [ "${#entries[@]}" -eq 0 ] || exit 1
+    else
+        if [ "$kind" = lock ]; then
+            [ -f ./owner ] && [ ! -L ./owner ] \
+                && printf '%s\n' "$release_id" | cmp -s -- ./owner - || exit 1
+        fi
+        for entry in "${entries[@]}"; do
+            leaf=${entry#./}
+            [[ $leaf =~ ^[A-Za-z0-9._-]+$ ]] || exit 1
+            [ -f "$entry" ] && [ ! -L "$entry" ] || exit 1
+            if [ "$kind" = lock ]; then expected=${begin_owned_lock_metadata[$leaf]:-}; else expected=${begin_owned_metadata[$leaf]:-}; fi
+            [ -n "$expected" ] && [ "$(stat -c '%d:%i' -- "$entry")" = "$expected" ] || exit 1
+        done
+        if [ "${#entries[@]}" -gt 0 ]; then rm -f -- "${entries[@]}" || exit 1; fi
+    fi
+    # A replaced name after the relative unlinks keeps its contents untouched.
+    begin_ancestors_match && begin_directory_matches "$path" "$identity" || exit 1
+    rmdir -- "$path"
+)
+
+cleanup_begin() {
+    local status=$1 path identity name detached
+    # A release directory may use the filesystem's whole 255-byte component.
+    # Device/inode numbers and PID keep detach names bounded independently.
+    local prefix=".begin-cleanup-${begin_lock_identity//:/-}-$$"
+    local candidate_detached="$releases/$prefix-candidate" transaction_detached="$state_root/$prefix-transaction" lock_detached="$control/$prefix-lock"
+    [ "$status" -ne 0 ] || return 0
+    echo '::error::Deployment initialization failed; checking owned initialization directories.' >&2
+    if [ -n "$begin_lock_source" ] && { [ -e "$begin_lock_source" ] || [ -L "$begin_lock_source" ]; }; then
+        if begin_ancestors_match && begin_directory_matches "$begin_lock_source" "$begin_lock_identity"; then
+            begin_remove_directory "$begin_lock_source" "$begin_lock_identity" lock || true
+        fi
+        return 0
+    fi
+    begin_lock_matches || { echo '::warning::Initialization ownership is uncertain; lock and evidence retained.' >&2; return 0; }
+    # mkdir can create a directory and still fail before returning success.
+    # Without a captured inode, keep any existing path and the canonical lock.
+    # If no directory exists, the failed creation needs nothing removed.
+    if [ "$begin_transaction_created" = true ] && [ -z "$begin_transaction_identity" ]; then
+        if [ -e "$begin_transaction_path" ] || [ -L "$begin_transaction_path" ]; then return 0; fi
+        begin_transaction_created=false
+    fi
+    if [ "$begin_candidate_created" = true ] && [ -z "$begin_candidate_identity" ]; then
+        if [ -e "$begin_candidate_path" ] || [ -L "$begin_candidate_path" ]; then return 0; fi
+        begin_candidate_created=false
+    fi
+    if [ "$begin_transaction_created" = true ]; then
+        begin_directory_matches "$begin_transaction_path" "$begin_transaction_identity" || return 0
+    fi
+    if [ "$begin_candidate_created" = true ]; then
+        begin_directory_matches "$begin_candidate_path" "$begin_candidate_identity" || return 0
+    fi
+    # Keep the canonical blocker until each child is removed successfully.
+    for name in candidate transaction; do
+        case $name in
+            candidate) [ "$begin_candidate_created" = true ] || continue; path=$begin_candidate_path; identity=$begin_candidate_identity; detached=$candidate_detached ;;
+            transaction) [ "$begin_transaction_created" = true ] || continue; path=$begin_transaction_path; identity=$begin_transaction_identity; detached=$transaction_detached ;;
+        esac
+        [ ! -e "$detached" ] && [ ! -L "$detached" ] || return 0
+        begin_lock_matches && begin_directory_matches "$path" "$identity" || return 0
+        mv -T -n -- "$path" "$detached" || return 0
+        begin_lock_matches && begin_directory_matches "$detached" "$identity" || return 0
+        begin_remove_directory "$detached" "$identity" "$name" || return 0
+        begin_lock_matches || return 0
+    done
+    [ ! -e "$lock_detached" ] && [ ! -L "$lock_detached" ] || return 0
+    begin_lock_matches || return 0
+    mv -T -n -- "$lock" "$lock_detached" || return 0
+    if ! begin_remove_directory "$lock_detached" "$begin_lock_identity" lock; then
+        mv -T -n -- "$lock_detached" "$lock" || true
+        return 0
+    fi
+    echo 'Released the failed initialization transaction and its owned lock.' >&2
+
+}
+
 begin() {
     if [ "$#" -lt 6 ]; then
         echo "usage: ... begin <app> <release> <commit> <lock-seconds> <retain> <failure-policy> <initial-live-commit> <path>..." >&2
@@ -712,69 +879,114 @@ begin() {
         echo '::error::Deployment generation must be a regular control file.' >&2; exit 1
     fi
 
-    local now acquired=false
+    # EXIT traps run after Bash unwinds function locals, so the identities and
+    # creation flags intentionally live for the lifetime of this invocation.
+    begin_root_identity=$(stat -c '%d:%i' -- "$HOME/.deployments")
+    begin_control_identity=$(stat -c '%d:%i' -- "$control")
+    begin_releases_identity=$(stat -c '%d:%i' -- "$releases")
+    begin_state_identity=$(stat -c '%d:%i' -- "$state_root")
+    local now evidence transaction_destination=$transaction original_directory=$PWD
     now=$(date +%s)
-    if mkdir "$lock" 2>/dev/null; then acquired=true; fi
-    [ "$acquired" = true ] || {
-        echo "::error::Another deployment owns $app_name's remote lock; automatic stale takeover is intentionally disabled." >&2
-        [ -f "$lock/owner" ] && echo "Lock owner: $(cat "$lock/owner")" >&2
-        echo "Verify that the owning run and all remote PHP processes have stopped before manually recovering this lock." >&2
+    for evidence in "$control"/.begin-cleanup-* "$releases"/.begin-cleanup-* "$state_root"/.begin-cleanup-*; do
+        if [ -e "$evidence" ] || [ -L "$evidence" ]; then
+            echo '::error::Uncertain initialization evidence requires deliberate recovery.' >&2
+            exit 1
+        fi
+    done
+    begin_lock_identity='' begin_lock_source='' begin_transaction_identity='' begin_candidate_identity=''
+    begin_transaction_created=false begin_candidate_created=false
+    begin_transaction_path=$transaction begin_candidate_path=$candidate
+    declare -gA begin_owned_lock_metadata=() begin_owned_metadata=()
+    # Keep errexit active in the initialization body; a conditional function call
+    # would suppress it inside write_value and could conceal failed writes.
+    trap 'cleanup_begin "$?"' EXIT
+    # Prepare a randomized private directory and full exclusive owner before
+    # publishing it. The canonical path can never supply an adopted identity.
+    begin_lock_source=$(mktemp -d "$control/.begin-cleanup-acquire.XXXXXXXX")
+    begin_lock_identity=$(stat -c '%d:%i' -- "$begin_lock_source")
+    cd -P -- "$begin_lock_source"
+    begin_ancestors_match && begin_directory_matches . "$begin_lock_identity" || exit 1
+    begin_metadata_root=$begin_lock_source begin_metadata_kind=lock
+    begin_write_value owner "$release_id"
+    begin_write_value started "$now"
+    begin_write_value requested-timeout "$lock_seconds"
+    begin_metadata_inventory "$begin_lock_source" "$begin_lock_identity" lock || exit 1
+    mv -T -n -- "$begin_lock_source" "$lock"
+    begin_lock_matches || {
+        echo "::error::Another deployment owns $app_name's remote lock or replaced its publication; automatic stale takeover is intentionally disabled." >&2
         exit 1
     }
-    printf '%s\n' "$release_id" >"$lock/owner"
+    # A waiter may have scanned before a failed cleanup exposed evidence.
+    for evidence in "$control"/.begin-cleanup-* "$releases"/.begin-cleanup-* "$state_root"/.begin-cleanup-*; do
+        if [ -e "$evidence" ] || [ -L "$evidence" ]; then
+            echo '::error::Initialization evidence appeared before lock publication.' >&2
+            exit 1
+        fi
+    done
     # Preserve evidence of every newer writer after its transaction is finalized.
     # Post-unlock diagnostics can then distinguish legitimate supersession from drift.
-    local generation_temp=''
+    local generation_temp='' generation_temp_identity=''
     if ! {
         generation_temp=$(mktemp "$control/.generation.XXXXXX") \
+            && generation_temp_identity=$(stat -c '%d:%i' -- "$generation_temp") \
             && printf '%s\n' "$release_id" >"$generation_temp" \
             && chmod 600 "$generation_temp" \
-            && mv -T -- "$generation_temp" "$control/generation" \
-            && printf '%s\n' "$now" >"$lock/started" \
-            && printf '%s\n' "$lock_seconds" >"$lock/requested-timeout"
+            && mv -T -- "$generation_temp" "$control/generation"
     }; then
-        if [ -n "$generation_temp" ]; then rm -f -- "$generation_temp"; fi
-        if [ -f "$lock/owner" ] && [ ! -L "$lock/owner" ] && [ "$(cat "$lock/owner")" = "$release_id" ]; then rm -rf -- "$lock"; fi
-        echo '::error::Could not publish deployment generation; owned lock released.' >&2
+        if [ -n "$generation_temp" ] && begin_lock_matches \
+            && [ -f "$generation_temp" ] && [ ! -L "$generation_temp" ] \
+            && [ "$(stat -c '%d:%i' -- "$generation_temp")" = "$generation_temp_identity" ]; then
+            rm -f -- "$generation_temp"
+        fi
+        echo '::error::Could not publish deployment generation.' >&2
         exit 1
     fi
 
-    if [ -e "$transaction" ] || [ -e "$candidate" ] || [ -L "$candidate" ]; then
-        rm -rf "$lock"
+    if [ -e "$transaction" ] || [ -L "$transaction" ] || [ -e "$candidate" ] || [ -L "$candidate" ]; then
         echo "::error::Release '$release_id' already exists; use a unique run attempt." >&2
         exit 1
     fi
-    if ! install -d -m 700 "$transaction" || ! install -d -m 755 "$candidate"; then
-        if [ -f "$lock/owner" ] && [ "$(cat "$lock/owner")" = "$release_id" ]; then rm -rf "$lock"; fi
-        rm -rf "$transaction" "$candidate"
-        echo "::error::Could not initialize the deployment transaction." >&2
-        exit 1
-    fi
-    printf '%s\n' "$@" >"$transaction/persistent-paths"
-    write_value commit "$commit"
-    write_value retain "$retain"
-    write_value failure_policy "$failure_policy"
-    write_value initial_live_commit "$initial_live_commit"
-    write_value layout "$layout"
-    write_value risk_started false
-    write_value recovery_required false
-    write_value activated false
-    write_value committed false
-    write_value previous_was_maintenance false
-    write_value phase begun
+    # Capture each unique private source before exposing a canonical release
+    # name, so another writer's canonical directory cannot supply its identity.
+    begin_transaction_path="$state_root/${begin_lock_source##*/}-transaction"
+    begin_transaction_created=true
+    mkdir -- "$begin_transaction_path"
+    begin_transaction_identity=$(stat -c '%d:%i' -- "$begin_transaction_path")
+    chmod 700 -- "$begin_transaction_path"
+    begin_lock_matches && begin_directory_matches "$begin_transaction_path" "$begin_transaction_identity" || exit 1
+    begin_candidate_path="$releases/${begin_lock_source##*/}-candidate"
+    begin_candidate_created=true
+    mkdir -- "$begin_candidate_path"
+    begin_candidate_identity=$(stat -c '%d:%i' -- "$begin_candidate_path")
+    chmod 755 -- "$begin_candidate_path"
+    begin_lock_matches && begin_directory_matches "$begin_candidate_path" "$begin_candidate_identity" || exit 1
+    cd -P -- "$begin_transaction_path"
+    begin_lock_matches && begin_directory_matches . "$begin_transaction_identity" || exit 1
+    transaction=$begin_transaction_path
+    begin_metadata_root=$begin_transaction_path begin_metadata_kind=transaction
+    begin_write_value persistent-paths "$@"
+    begin_write_value commit "$commit"
+    begin_write_value retain "$retain"
+    begin_write_value failure_policy "$failure_policy"
+    begin_write_value initial_live_commit "$initial_live_commit"
+    begin_write_value layout "$layout"
+    begin_write_value risk_started false
+    begin_write_value recovery_required false
+    begin_write_value activated false
+    begin_write_value committed false
+    begin_write_value previous_was_maintenance false
+    begin_write_value phase begun
 
     local selected
     selected=$(selected_target)
     case $selected in
-        none) write_value previous_target "$selected" ;;
+        none) begin_write_value previous_target "$selected" ;;
         legacy)
             if [ -z "$initial_live_commit" ]; then
-                rm -rf "$candidate" "$transaction" "$lock"
                 echo "::error::initial-live-commit is required when converting an existing in-place deployment." >&2
                 exit 1
             fi
             if [ -L "$control/legacy-live-commit" ] || { [ -e "$control/legacy-live-commit" ] && [ ! -f "$control/legacy-live-commit" ]; }; then
-                rm -rf "$candidate" "$transaction" "$lock"
                 echo "::error::The trusted legacy commit record has an unsafe type." >&2
                 exit 1
             fi
@@ -782,23 +994,36 @@ begin() {
             printf '%s\n' "$initial_live_commit" >"$legacy_commit_temp"
             chmod 600 "$legacy_commit_temp"
             mv -f "$legacy_commit_temp" "$control/legacy-live-commit"
-            write_value previous_target "$selected" ;;
+            begin_write_value previous_target "$selected" ;;
         stable)
             if [ "$layout" != stable-directory ]; then
-                rm -rf "$candidate" "$transaction" "$lock"
                 echo "::error::A managed real stable directory requires atomic-layout stable-directory." >&2
                 exit 1
             fi
             previous_release=$(metadata_value "$stable" release || true)
             previous_commit=$(metadata_value "$stable" commit || true)
-            plain_name "$previous_release" || { rm -rf "$candidate" "$transaction" "$lock"; echo "::error::Managed real directory has invalid release metadata." >&2; exit 1; }
-            [[ $previous_commit =~ ^[0-9A-Fa-f]{7,64}$ ]] || { rm -rf "$candidate" "$transaction" "$lock"; echo "::error::Managed real directory has invalid commit metadata." >&2; exit 1; }
-            write_value previous_release "$previous_release"
-            write_value previous_commit "$previous_commit"
-            write_value previous_target "$selected" ;;
-        invalid) rm -rf "$candidate" "$transaction" "$lock"; echo "::error::~/$app_name is neither absent, a Laravel app, nor a managed release symlink." >&2; exit 1 ;;
-        *) validate_release_target "$selected" || { rm -rf "$candidate" "$transaction" "$lock"; echo "::error::Stable symlink target '$selected' is outside the managed release tree." >&2; exit 1; }; write_value previous_target "$selected" ;;
+            plain_name "$previous_release" || { echo "::error::Managed real directory has invalid release metadata." >&2; exit 1; }
+            [[ $previous_commit =~ ^[0-9A-Fa-f]{7,64}$ ]] || { echo "::error::Managed real directory has invalid commit metadata." >&2; exit 1; }
+            begin_write_value previous_release "$previous_release"
+            begin_write_value previous_commit "$previous_commit"
+            begin_write_value previous_target "$selected" ;;
+        invalid) echo "::error::~/$app_name is neither absent, a Laravel app, nor a managed release symlink." >&2; exit 1 ;;
+        *) validate_release_target "$selected" || { echo "::error::Stable symlink target '$selected' is outside the managed release tree." >&2; exit 1; }; begin_write_value previous_target "$selected" ;;
     esac
+    begin_lock_matches && begin_metadata_inventory "$begin_transaction_path" "$begin_transaction_identity" transaction || exit 1
+    mv -T -n -- "$begin_transaction_path" "$transaction_destination"
+    begin_directory_matches "$transaction_destination" "$begin_transaction_identity"
+    begin_transaction_path=$transaction_destination
+    transaction=$transaction_destination
+    begin_lock_matches || exit 1
+    # Candidate remains empty; no metadata writes follow its publication.
+    if ! (cd -P -- "$begin_candidate_path" && shopt -s nullglob dotglob && entries=(./*) && [ "${#entries[@]}" -eq 0 ]); then exit 1; fi
+    mv -T -n -- "$begin_candidate_path" "$candidate"
+    begin_directory_matches "$candidate" "$begin_candidate_identity"
+    begin_candidate_path=$candidate
+    begin_lock_matches || exit 1
+    cd -P -- "$original_directory"
+    trap - EXIT
     echo "Started atomic release $release_id for $app_name; previous selection: $selected."
 }
 
