@@ -49,11 +49,15 @@ addresses+=(127.0.0.1)
 meta='000|'
 for address in "${addresses[@]}"; do
     : >"$body"
-    meta=$(curl --silent --insecure --max-time "$limit" \
+    # A transfer curl reports as failed (timed out or cut off after a 2xx header) is no answer,
+    # whatever status --write-out printed: a partial body must never pass a check.
+    if ! meta=$(curl --silent --insecure --max-time "$limit" \
         --resolve "$host:443:$address" \
         --header 'Cache-Control: no-cache' \
         --output "$body" --write-out '%{http_code}|%{content_type}' \
-        "https://$host$path" 2>/dev/null) || true
+        "https://$host$path" 2>/dev/null); then
+        meta='000|'
+    fi
     [ "${meta%%|*}" = 000 ] || break
 done
 

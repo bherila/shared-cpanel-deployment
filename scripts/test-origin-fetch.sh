@@ -23,6 +23,7 @@ while [ "$#" -gt 0 ]; do
 done
 case $resolve in
     *:192.0.2.10) printf '000|'; exit 7 ;;
+    *:203.0.113.5) printf 'Application up, then the transfer stalled' >"$output"; printf '200|text/html'; exit 28 ;;
     *:198.51.100.7) printf 'line one\nline two' >"$output"; printf '200|text/plain' ;;
     *) printf 'loopback' >"$output"; printf '200|text/plain' ;;
 esac
@@ -39,6 +40,17 @@ out=$(bash "$here/origin-fetch.sh" site.example.test /up 5)
     || fail 'own IPv4 addresses are tried in order and the first answer wins'
 [ -f "$fixture/insecure" ] || fail 'the host talking to itself does not verify TLS'
 echo 'ok - the first own address that answers is used, IPv6 skipped'
+
+# A 2xx header followed by a timeout is no answer: the next address is tried instead.
+: >"$fixture/resolves"
+cat >"$fixture/bin/hostname" <<'MOCK'
+#!/usr/bin/env bash
+[ "${1:-}" = -I ] && printf '203.0.113.5 198.51.100.7\n'
+MOCK
+out=$(bash "$here/origin-fetch.sh" site.example.test /up 5)
+[ "$(tail -n1 <<<"$out")" = 'ORIGIN-META 200|text/plain' ] && [ "$(sed '$d' <<<"$out")" = $'line one\nline two' ] \
+    || fail 'a transfer curl reports as failed is not accepted on its status'
+echo 'ok - a 2xx header followed by a failed transfer is no answer'
 
 for bad in 'bad host!' 'site.example.test'; do
     path=/up
