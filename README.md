@@ -282,6 +282,13 @@ and remote processes have stopped, an operator must recover/remove an abandoned 
 Every successfully finalized failure becomes retention-eligible; cleanup preserves the live release,
 the prior release and genuinely incomplete transactions.
 
+For an exact managed real stable directory left in file maintenance with no lock and
+an empty transaction-state directory, the separate [orphan recovery action and runbook](recover-orphan/README.md)
+provide an explicitly confirmed operation. Normal deployment continues refusing
+intentional maintenance. Recovery keeps application cron paused, owns the canonical
+lock through cache preparation and application serving verification, and can restore
+the exact saved maintenance bytes without bootstrapping Laravel after interruption.
+
 ## What the guards refuse
 
 **Upload.** Atomic mode (`scripts/rsync-atomic-release.sh`) only writes the exact empty candidate created
@@ -463,6 +470,8 @@ bash scripts/test-atomic-release.sh
 bash scripts/test-action-contract.sh
 bash scripts/test-no-process-substitution.sh
 python3 scripts/test-live-verification.py
+bash scripts/test-recover-orphan.sh
+bash scripts/test-recover-orphan-contract.sh
 bash scripts/test-install-cron.sh
 bash scripts/test-prepare-cron-lines.sh
 bash scripts/test-rsync-atomic-release.sh
@@ -477,6 +486,11 @@ bash scripts/test-operational-audit.sh
 bash scripts/test-ensure-passport-keys.sh
 bash scripts/test-install-branding.sh
 ```
+
+The real Laravel 12/13 harness also runs the orphan recovery integration against its
+temporary managed application, including actual local HTTP application identity,
+generated cache isolation, direct rollback with broken bootstrap, and a later normal
+deployment. Never run its deliberately failed migration scenario against production.
 
 Release by tagging `vX.Y.Z`; callers pin the tag's commit SHA.
 

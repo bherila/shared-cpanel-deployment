@@ -60,7 +60,7 @@ remote_rejects() {
     ! bash "$here/assert-no-process-substitution.sh" --heredoc REMOTE "$scratch/remote-fixture.sh" \
         >"$scratch/result" 2>&1 && grep -q '\[SC3001\]' "$scratch/result"
 }
-for helper in rsync-deploy.sh rsync-migrations.sh rsync-atomic-release.sh; do
+for helper in rsync-deploy.sh rsync-migrations.sh rsync-atomic-release.sh run-recover-orphan.sh; do
     check "$helper remote input argument substitution is rejected" remote_rejects "$helper" 'cat <(printf input)'
     check "$helper remote output argument substitution is rejected" remote_rejects "$helper" 'tee >(cat)'
     check "$helper remote read-loop substitution is rejected" remote_rejects "$helper" \

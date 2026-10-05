@@ -1,0 +1,102 @@
+name: Recover orphaned Laravel maintenance
+description: Explicitly resume or restore an exact managed stable release under a private owned recovery transaction.
+inputs:
+  operation:
+    description: resume, or filesystem-only restore after proving a prior recovery session stopped
+    default: resume
+  deploy-dir:
+    description: Exact plain account-home application directory
+    required: true
+  expected-release:
+    description: Exact selected .deploy-release release field
+    required: true
+  expected-commit:
+    description: Exact selected full lowercase commit
+    required: true
+  recovery-token:
+    description: Operator-generated orphan- plus 32 lowercase hexadecimal characters; retain for explicit restore
+    required: true
+  confirmation:
+    description: Must equal selected-maintenance-source-config; acknowledges exact selection and rebuilding source environment configuration
+    required: true
+  owner-stopped:
+    description: Must equal true only after proving previous workflows, recovery sessions and all app workers stopped
+    required: true
+  persistent-paths:
+    description: Exact newline-separated managed persistent paths including storage
+    default: storage
+  php-binary:
+    description: Absolute cPanel PHP binary (Laravel 12 or 13 compatible)
+    default: /opt/cpanel/ea-php85/root/usr/bin/php
+  artisan-memory-limit:
+    description: Finite bound from 1M through 1024M or 1G
+    default: 256M
+  health-url:
+    description: Exact HTTPS health URL expected to return 200 after actual framework serving proof
+    required: true
+  verification-script:
+    description: Required for resume; checkout-relative read-only host Bash verifier proving this application's actual web/identity/assets. Called with stable absolute path and PHP under the lock. Restore may use '-'.
+    required: true
+    default: '-'
+  ssh-host:
+    required: true
+    description: Pinned SSH hostname
+  ssh-username:
+    required: true
+    description: Shared account user
+  ssh-private-key:
+    required: true
+    description: Dedicated authorized deployment key
+  ssh-known-hosts:
+    required: true
+    description: Pinned SSH known-hosts entry
+  ssh-alias:
+    default: cpanel-orphan-recovery
+    description: Isolated runner alias
+runs:
+  using: composite
+  steps:
+    - name: Validate explicit orphan recovery before SSH
+      shell: bash
+      env:
+        RECOVERY_MODE: ${{ inputs.operation }}
+        RECOVERY_APP: ${{ inputs.deploy-dir }}
+        RECOVERY_RELEASE: ${{ inputs.expected-release }}
+        RECOVERY_COMMIT: ${{ inputs.expected-commit }}
+        RECOVERY_TOKEN: ${{ inputs.recovery-token }}
+        RECOVERY_PATHS: ${{ inputs.persistent-paths }}
+        RECOVERY_PHP: ${{ inputs.php-binary }}
+        RECOVERY_MEMORY: ${{ inputs.artisan-memory-limit }}
+        RECOVERY_SITE: ${{ inputs.health-url }}
+        RECOVERY_CONFIRMATION: ${{ inputs.confirmation }}
+        RECOVERY_STOPPED: ${{ inputs.owner-stopped }}
+        RECOVERY_VERIFIER: ${{ inputs.verification-script }}
+      run: |
+        bash "$GITHUB_ACTION_PATH/../scripts/validate-recover-orphan-inputs.sh" "$RECOVERY_MODE" "$RECOVERY_APP" "$RECOVERY_RELEASE" "$RECOVERY_COMMIT" "$RECOVERY_TOKEN" "$RECOVERY_PATHS" "$RECOVERY_PHP" "$RECOVERY_MEMORY" "$RECOVERY_SITE" "$RECOVERY_CONFIRMATION" "$RECOVERY_STOPPED" "$RECOVERY_VERIFIER"
+    - name: Configure pinned recovery SSH
+      shell: bash
+      env:
+        SSH_ALIAS: ${{ inputs.ssh-alias }}
+        SSH_HOST_NAME: ${{ inputs.ssh-host }}
+        SSH_USER_NAME: ${{ inputs.ssh-username }}
+        SSH_PRIVATE_KEY: ${{ inputs.ssh-private-key }}
+        SSH_KNOWN_HOSTS: ${{ inputs.ssh-known-hosts }}
+      run: bash "$GITHUB_ACTION_PATH/../scripts/configure-ssh.sh"
+    - name: Recover the exact orphaned selected release
+      shell: bash
+      env:
+        RECOVERY_MODE: ${{ inputs.operation }}
+        RECOVERY_APP: ${{ inputs.deploy-dir }}
+        RECOVERY_RELEASE: ${{ inputs.expected-release }}
+        RECOVERY_COMMIT: ${{ inputs.expected-commit }}
+        RECOVERY_TOKEN: ${{ inputs.recovery-token }}
+        RECOVERY_PATHS: ${{ inputs.persistent-paths }}
+        RECOVERY_PHP: ${{ inputs.php-binary }}
+        RECOVERY_MEMORY: ${{ inputs.artisan-memory-limit }}
+        RECOVERY_SITE: ${{ inputs.health-url }}
+        RECOVERY_CONFIRMATION: ${{ inputs.confirmation }}
+        RECOVERY_STOPPED: ${{ inputs.owner-stopped }}
+        RECOVERY_VERIFIER: ${{ inputs.verification-script }}
+        RECOVERY_SSH_TARGET: ${{ inputs.ssh-alias }}
+      run: |
+        bash "$GITHUB_ACTION_PATH/../scripts/run-recover-orphan.sh" "$RECOVERY_MODE" "$RECOVERY_APP" "$RECOVERY_RELEASE" "$RECOVERY_COMMIT" "$RECOVERY_TOKEN" "$RECOVERY_PATHS" "$RECOVERY_PHP" "$RECOVERY_MEMORY" "$RECOVERY_SITE" "$RECOVERY_CONFIRMATION" "$RECOVERY_STOPPED" "$RECOVERY_VERIFIER"
