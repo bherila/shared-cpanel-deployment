@@ -420,6 +420,18 @@ check "a healthy served failure keeps the candidate serving" test "$(status_fiel
 check "a healthy served failure keeps application cron" grep -Fq '# JOB:app-scheduler' "$CRONTAB_FILE"
 check "a healthy served failure releases the deploy lock" test ! -e "$HOME/.deployments/app/deploy.lock/owner"
 
+# The left-serving decision survives a finalizer that died after recording it:
+# a retry with phase already finalized and the lock still held keeps serving.
+setup; make_legacy; begin_and_upload left-serving-retry; preflight_quiesce left-serving-retry; bash "$script" prepare app left-serving-retry "$php" >/dev/null
+bash "$script" risk app left-serving-retry "$php" >/dev/null; bash "$script" activate app left-serving-retry "$php" >/dev/null
+bash "$script" serve app left-serving-retry "$php" >/dev/null; bash "$script" restore-cron app left-serving-retry >/dev/null
+bash "$script" mark-healthy app left-serving-retry >/dev/null
+printf 'true\n' >"$HOME/.deployments/app/state/left-serving-retry/left_serving"
+printf 'finalized\n' >"$HOME/.deployments/app/state/left-serving-retry/phase"
+bash "$script" finalize app left-serving-retry "$php" >/dev/null 2>&1
+check "a retried finalizer honours the recorded left-serving decision" test "$(status_field left-serving-retry live_state)" = serving
+check "a retried finalizer keeps application cron" grep -Fq '# JOB:app-scheduler' "$CRONTAB_FILE"
+
 # The mark is not a pass: a candidate that went down after it was marked healthy
 # still gets failure-policy maintenance.
 setup; make_legacy; begin_and_upload marked-then-down; preflight_quiesce marked-then-down; bash "$script" prepare app marked-then-down "$php" >/dev/null

@@ -1309,7 +1309,7 @@ finalize() {
         echo "usage: ... finalize <app> <release> <php> [memory-limit]" >&2
         exit 2
     fi
-    local php=$1 memory=${2:-} committed=false risk_started=false recovery_required=false policy=maintenance previous=none current current_root recovery_status=0 conversion_target='' conversion_release='' conversion_commit='' layout=release-symlink live_root phase='' served_healthy=false
+    local php=$1 memory=${2:-} committed=false risk_started=false recovery_required=false policy=maintenance previous=none current current_root recovery_status=0 conversion_target='' conversion_release='' conversion_commit='' layout=release-symlink live_root phase='' served_healthy=false left_serving=false
     validate_memory_limit "$memory"
     if [ ! -d "$transaction" ]; then
         if [ -f "$lock/owner" ] && [ "$(cat "$lock/owner")" = "$release_id" ]; then release_lock || true; fi
@@ -1329,15 +1329,21 @@ finalize() {
     transaction_layout && layout=$REPLY
     read_value phase && phase=$REPLY
     read_value served_healthy && served_healthy=$REPLY
+    read_value left_serving && left_serving=$REPLY
 
     # A candidate that already served and passed the health check is left
     # serving when a later read-only check fails (a flaky probe took a healthy
     # site down on 2026-10-05). Maintenance is for failures that can leave the
     # schema and code disagreeing; this is not one. Rollback keeps its meaning.
+    #
+    # The decision is durable (left_serving) before anything else is written, so
+    # a finalizer retried after phase=finalized, or after a failed cleanup that
+    # kept the lock, still recognizes it instead of taking the release down.
     if [ "$committed" != true ] && [ "$risk_started" = true ] && [ "$policy" = maintenance ] \
-        && [ "$served_healthy" = true ] && [ "$phase" = serving ]; then
+        && { { [ "$served_healthy" = true ] && [ "$phase" = serving ]; } || [ "$left_serving" = true ]; }; then
         live_root=$(selected_candidate_root || true)
         if [ -n "$live_root" ] && require_serving "$php" "$live_root" "$memory" >/dev/null 2>&1; then
+            write_value left_serving true
             echo "::error::Deployment failed after release $release_id was serving and healthy; it was left serving and was not committed. Investigate the failing check."
             committed=left-serving
         else
