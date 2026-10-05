@@ -74,7 +74,7 @@ implicit behavior change.
 | `ssh-alias` | `cpanel-deploy` | Returned as the `ssh-target` output for your own steps. Every call through the alias shares one multiplexed connection (`ControlMaster auto`, `ControlPersist 15m`), so a deploy authenticates once instead of tripping a host's per-source connection-rate limit partway through. |
 | **Application** | | |
 | `deploy-dir` | required | Plain directory name under the account home. Never a webroot. |
-| `site-url` | required | https URL for the health and PHP checks. |
+| `site-url` | required | https URL whose host names the site for the health and PHP checks. Both are fetched from the host's own web server under that name (`curl --resolve` to its own addresses, over SSH), not through any proxy or CDN in front of it, so a proxy rule that challenges the runner's location cannot answer for the application. |
 | `php-version` | `8.5` | Web handler, CLI binary and the PHP check. |
 | `php-binary` | `/opt/cpanel/ea-php85/root/usr/bin/php` | Derived from `php-version`. cPanel's default `php` is older. |
 | `deployment-mode` | `atomic` | Safe v2 versioned releases. `in-place` is the explicit v1 escape hatch. |
@@ -462,6 +462,7 @@ bash scripts/test-rsync-deploy.sh
 bash scripts/test-rsync-migrations.sh
 bash scripts/test-htaccess.sh
 bash scripts/test-verify-web-php.sh
+bash scripts/test-origin-fetch.sh
 bash scripts/test-configure-env.sh
 bash scripts/test-assert-no-pending-migrations.sh
 bash scripts/test-remote-artisan.sh

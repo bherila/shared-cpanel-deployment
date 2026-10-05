@@ -9,7 +9,8 @@
 # The web handler's limits cannot be read from the CLI, and on LiteSpeed they cannot be trusted from a
 # file either: `.user.ini` is silently ignored there, and only `php_value` in `public/.htaccess` is
 # honoured. So this asks the running vhost. It writes a one-line PHP file with an unguessable name
-# into public/, fetches it through <site-url>, and always deletes it again. The file prints the PHP
+# into public/, fetches it from the host's own web server under <site-url>'s name, and always
+# deletes it again. The file prints the PHP
 # version, `memory_limit` and SAPI — nothing else.
 #
 # Fails the deploy when the web handler runs a different PHP major.minor than <php-version>, or a
@@ -28,6 +29,7 @@ fi
 target=$1
 app_dir=$2
 site_url=${3%/}
+here=$(cd "$(dirname "$0")" && pwd)
 want_php=$4
 want_memory=$5
 shift 5
@@ -58,6 +60,19 @@ if [ -z "$minimum" ] || [ "$minimum" = -1 ]; then
     exit 2
 fi
 
+# The probe is fetched from the host's own web server (origin-fetch.sh over SSH), not through the
+# public URL from the runner: a proxy rule that challenges visitors by country answered the
+# runner's requests itself with an HTML 200 whenever it ran outside that country.
+case $site_url in
+    https://*) ;;
+    *) echo "::error::The site URL must be an https URL." >&2; exit 2 ;;
+esac
+site_rest=${site_url#https://}
+site_host=${site_rest%%/*}
+site_path=''
+[ "$site_rest" = "$site_host" ] || site_path=/${site_rest#*/}
+[[ $site_host =~ ^[A-Za-z0-9.-]+$ ]] || { echo "::error::The site URL has an invalid host." >&2; exit 2; }
+
 # The probe's overall retry window in seconds; see the retry loop below.
 window=${WEB_PHP_PROBE_WINDOW:-75}
 [[ $window =~ ^[0-9]+$ ]] || { echo "::error::WEB_PHP_PROBE_WINDOW must be whole seconds." >&2; exit 2; }
@@ -74,6 +89,7 @@ remote_ssh() {
 
 cleanup() {
     [ -z "${response_file:-}" ] || rm -f "$response_file"
+    [ -z "${raw_file:-}" ] || rm -f "$raw_file"
     remote_ssh "rm -f \"\$HOME/$remote\"" <&- || echo "::warning::Could not delete ~/$remote; remove it by hand." >&2
 }
 trap cleanup EXIT
@@ -93,6 +109,7 @@ PHP
 # under public/ (a rewritten .htaccess handler, a swapped stable directory) has been answered
 # with an HTML 200 for several seconds, which three tries two seconds apart did not outlast.
 response_file=$(mktemp)
+raw_file=$(mktemp)
 runtime_pattern='^[0-9]+\.[0-9]+\|(-1|[0-9]+[KkMmGg]?)\|[A-Za-z0-9_-]+$'
 delays=(2 3 5 8 10 12 15)
 attempts=$(( ${#delays[@]} + 1 ))
@@ -104,16 +121,25 @@ for (( attempt = 1; attempt <= attempts; attempt++ )); do
     request_limit=$(( deadline - SECONDS ))
     (( request_limit <= 20 )) || request_limit=20
     (( request_limit >= 5 )) || request_limit=5
-    if response_meta=$(curl --fail --silent --show-error --max-time "$request_limit" \
-        --header 'Cache-Control: no-cache' --output "$response_file" \
-        --write-out '%{http_code}|%{content_type}' "$site_url/$name"); then
-        answer=$(<"$response_file")
-        if [[ $answer =~ $runtime_pattern ]]; then
-            break
+    # shellcheck disable=SC2029
+    if ssh ${ssh_options[@]+"${ssh_options[@]}"} "$target" \
+        "bash -s -- $(printf '%q ' "$site_host" "$site_path/$name" "$request_limit")" \
+        <"$here/origin-fetch.sh" >"$raw_file" 2>/dev/null \
+        && response_meta=$(sed -n '$s/^ORIGIN-META //p' "$raw_file") && [ -n "$response_meta" ]; then
+        sed '$d' "$raw_file" >"$response_file"
+        if [[ ${response_meta%%|*} =~ ^2[0-9][0-9]$ ]]; then
+            answer=$(<"$response_file")
+            if [[ $answer =~ $runtime_pattern ]]; then
+                break
+            fi
+            reason='did not return the PHP runtime fields'
+        else
+            reason='could not fetch the PHP runtime fields'
         fi
-        reason='did not return the PHP runtime fields'
     else
-        reason='could not fetch the PHP runtime fields'
+        : >"$response_file"
+        response_meta='000|'
+        reason='could not reach the host to fetch the PHP runtime fields'
     fi
     IFS='|' read -r http_status content_type <<<"$response_meta"
     # Never print the body, or even an HTML page's title: an intermediary or error page can put
