@@ -32,7 +32,10 @@ limit=$3
 
 [[ $host =~ ^[A-Za-z0-9.-]+$ ]] || { echo "origin-fetch: invalid host" >&2; exit 2; }
 [[ $path =~ ^/[A-Za-z0-9._~/%-]*$ ]] || { echo "origin-fetch: invalid path" >&2; exit 2; }
-[[ $limit =~ ^[0-9]+$ ]] && [ "$limit" -gt 0 ] || { echo "origin-fetch: invalid time limit" >&2; exit 2; }
+if ! [[ $limit =~ ^[0-9]+$ ]] || [ "$limit" -eq 0 ]; then
+    echo "origin-fetch: invalid time limit" >&2
+    exit 2
+fi
 
 body=$(mktemp)
 trap 'rm -f "$body"' EXIT
