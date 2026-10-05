@@ -470,7 +470,10 @@ Remote shell scripts must avoid process substitution: CageFS hosts may not expos
 remote deployment scripts with ShellCheck's parser for both input and output forms,
 while allowing ordinary redirects, comparisons and quoted data. Check a new remote
 helper with `bash scripts/assert-no-process-substitution.sh path/to/helper.sh` and
-include that invocation in its contract harness. This is a runner/CI check; it adds
+include that invocation in its contract harness. Runner upload helpers also contain
+quoted remote shell heredocs; `--heredoc REMOTE` extracts and parses every named
+body, refusing absent or incomplete payloads. Their actual SSH payloads have input,
+output and read-loop mutation fixtures. This is a runner/CI check; it adds
 no ShellCheck dependency to the remote host.
 
 ### Canonical runtime audit

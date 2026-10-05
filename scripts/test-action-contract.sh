@@ -96,6 +96,10 @@ check "remote deployment scripts never require process substitution" bash \
     "$here/scripts/configure-env.sh" "$here/scripts/ensure-passport-keys.sh" \
     "$here/scripts/ensure-webroot-symlink.sh" "$here/scripts/install-branding.sh" \
     "$here/scripts/install-cron.sh"
+check "remote upload heredocs never require process substitution" bash \
+    "$here/scripts/assert-no-process-substitution.sh" --heredoc REMOTE \
+    "$here/scripts/rsync-deploy.sh" "$here/scripts/rsync-migrations.sh" \
+    "$here/scripts/rsync-atomic-release.sh"
 
 runtime=$(line_of 'name: Audit canonical selected runtime paths')
 final_runtime=$(line_of 'name: Audit finalized runtime and transaction state')

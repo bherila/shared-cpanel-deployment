@@ -48,5 +48,43 @@ check "invalid shell syntax fails closed" bash -c \
 check "missing scripts fail closed" bash -c '! bash "$1" "$2" >/dev/null 2>&1' sh \
     "$here/assert-no-process-substitution.sh" "$scratch/missing.sh"
 
+# Invoked indirectly through check inside the helper loop.
+# shellcheck disable=SC2329
+remote_rejects() {
+    local helper=$1 injection=$2
+    # Mutate the actual SSH payload, without running any upload or SSH command.
+    awk -v injection="$injection" '
+        { print }
+        index($0, "<<\047REMOTE\047") { print injection }
+    ' "$here/$helper" >"$scratch/remote-fixture.sh"
+    ! bash "$here/assert-no-process-substitution.sh" --heredoc REMOTE "$scratch/remote-fixture.sh" \
+        >"$scratch/result" 2>&1 && grep -q '\[SC3001\]' "$scratch/result"
+}
+for helper in rsync-deploy.sh rsync-migrations.sh rsync-atomic-release.sh; do
+    check "$helper remote input argument substitution is rejected" remote_rejects "$helper" 'cat <(printf input)'
+    check "$helper remote output argument substitution is rejected" remote_rejects "$helper" 'tee >(cat)'
+    check "$helper remote read-loop substitution is rejected" remote_rejects "$helper" \
+        'while read -r row; do printf "%s" "$row"; done < <(printf input)'
+done
+cat >"$scratch/multiple.sh" <<'FIXTURE'
+#!/usr/bin/env bash
+runner=<(printf local)
+ssh host 'bash -s' <<'REMOTE'
+printf '<(quoted data)'
+REMOTE
+ssh host 'bash -s' <<'REMOTE'
+tee >(cat)
+REMOTE
+FIXTURE
+check "every remote heredoc is inspected" bash -c \
+    '! bash "$1" --heredoc REMOTE "$2" >"$3" 2>&1 && grep -q "\[SC3001\]" "$3"' sh \
+    "$here/assert-no-process-substitution.sh" "$scratch/multiple.sh" "$scratch/multiple-result"
+sed 's/tee >(cat)/cat < input > output/' "$scratch/multiple.sh" >"$scratch/allowed-heredocs.sh"
+check "runner substitutions and quoted remote data remain accepted" bash \
+    "$here/assert-no-process-substitution.sh" --heredoc REMOTE "$scratch/allowed-heredocs.sh"
+check "a missing named remote heredoc fails closed" bash -c \
+    '! bash "$1" --heredoc DIFFERENT "$2" >/dev/null 2>&1' sh \
+    "$here/assert-no-process-substitution.sh" "$scratch/allowed-heredocs.sh"
+
 echo "failures: $fails"
 exit "$fails"
