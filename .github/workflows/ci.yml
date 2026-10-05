@@ -42,6 +42,9 @@ jobs:
       - name: atomic-release.sh harness
         run: bash scripts/test-atomic-release.sh
 
+      - name: Atomic initialization fault and ownership harness
+        run: bash scripts/test-atomic-begin-cleanup.sh
+
       - name: rsync-atomic-release.sh harness
         run: bash scripts/test-rsync-atomic-release.sh
 

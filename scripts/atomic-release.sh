@@ -680,6 +680,87 @@ capacity() {
     write_value phase capacity_checked
 }
 
+# Initialization has not touched application runtime data. If any write fails,
+# release only the directories created by this invocation. Inode identities
+# distinguish replacement owners even when an operator reuses the release id.
+begin_directory_matches() {
+    local path=$1 identity=$2
+    [ -n "$identity" ] && [ -d "$path" ] && [ ! -L "$path" ] \
+        && [ "$(stat -c '%d:%i' -- "$path")" = "$identity" ]
+}
+
+begin_ancestors_match() {
+    begin_directory_matches "$HOME/.deployments" "$begin_root_identity" \
+        && begin_directory_matches "$control" "$begin_control_identity" \
+        && begin_directory_matches "$releases" "$begin_releases_identity" \
+        && begin_directory_matches "$state_root" "$begin_state_identity"
+}
+
+begin_lock_matches() {
+    begin_ancestors_match && begin_directory_matches "$lock" "$begin_lock_identity" \
+        && [ -f "$lock/owner" ] && [ ! -L "$lock/owner" ] \
+        && printf '%s\n' "$release_id" | cmp -s -- "$lock/owner" -
+}
+
+cleanup_begin() {
+    local status=$1 path identity name detached
+    local prefix="$control/.begin-cleanup-${release_id}-$$"
+    [ "$status" -ne 0 ] || return 0
+    echo '::error::Deployment initialization failed; checking owned initialization directories.' >&2
+    begin_lock_matches || { echo '::warning::Initialization ownership is uncertain; lock and evidence retained.' >&2; return 0; }
+    if [ "$begin_transaction_created" = true ]; then
+        begin_directory_matches "$transaction" "$begin_transaction_identity" || return 0
+    fi
+    if [ "$begin_candidate_created" = true ]; then
+        begin_directory_matches "$candidate" "$begin_candidate_identity" || return 0
+    fi
+    for name in candidate transaction lock; do
+        case $name in
+            candidate) [ "$begin_candidate_created" = true ] || continue; path=$candidate; identity=$begin_candidate_identity ;;
+            transaction) [ "$begin_transaction_created" = true ] || continue; path=$transaction; identity=$begin_transaction_identity ;;
+            lock) path=$lock; identity=$begin_lock_identity ;;
+        esac
+        detached="$prefix-$name"
+        # Renaming into sibling names allocates no directory inode or metadata
+        # file, so persistent mktemp/quota failures do not disable cleanup.
+        # No-clobber protects prior recovery evidence at these unique names.
+        [ ! -e "$detached" ] && [ ! -L "$detached" ] || return 0
+        begin_lock_matches && begin_directory_matches "$path" "$identity" || return 0
+        mv -T -n -- "$path" "$detached" || return 0
+        if ! begin_directory_matches "$detached" "$identity"; then
+            if [ "$name" = lock ]; then mv -T -n -- "$detached" "$lock" || true; fi
+            return 0
+        fi
+        if [ "$name" != lock ]; then begin_lock_matches || return 0; fi
+    done
+    if ! { begin_ancestors_match \
+        && begin_directory_matches "$prefix-lock" "$begin_lock_identity" \
+        && [ -f "$prefix-lock/owner" ] && [ ! -L "$prefix-lock/owner" ] \
+        && printf '%s\n' "$release_id" | cmp -s -- "$prefix-lock/owner" -; }; then
+        mv -T -n -- "$prefix-lock" "$lock" || true
+        return 0
+    fi
+    # Recheck every detached inode before removal. Any mismatch keeps the lock
+    # as a blocker where possible and leaves all uncertain evidence untouched.
+    if [ "$begin_candidate_created" = true ]; then
+        if ! begin_directory_matches "$prefix-candidate" "$begin_candidate_identity"; then
+            mv -T -n -- "$prefix-lock" "$lock" || true; return 0
+        fi
+    fi
+    if [ "$begin_transaction_created" = true ]; then
+        if ! begin_directory_matches "$prefix-transaction" "$begin_transaction_identity"; then
+            mv -T -n -- "$prefix-lock" "$lock" || true; return 0
+        fi
+    fi
+    if { [ "$begin_candidate_created" != true ] || rm -rf -- "$prefix-candidate"; } \
+        && { [ "$begin_transaction_created" != true ] || rm -rf -- "$prefix-transaction"; }; then
+        rm -rf -- "$prefix-lock" || { mv -T -n -- "$prefix-lock" "$lock" || true; return 0; }
+        echo 'Released the failed initialization transaction and its owned lock.' >&2
+    else
+        mv -T -n -- "$prefix-lock" "$lock" || true
+    fi
+}
+
 begin() {
     if [ "$#" -lt 6 ]; then
         echo "usage: ... begin <app> <release> <commit> <lock-seconds> <retain> <failure-policy> <initial-live-commit> <path>..." >&2
@@ -712,6 +793,12 @@ begin() {
         echo '::error::Deployment generation must be a regular control file.' >&2; exit 1
     fi
 
+    # EXIT traps run after Bash unwinds function locals, so the identities and
+    # creation flags intentionally live for the lifetime of this invocation.
+    begin_root_identity=$(stat -c '%d:%i' -- "$HOME/.deployments")
+    begin_control_identity=$(stat -c '%d:%i' -- "$control")
+    begin_releases_identity=$(stat -c '%d:%i' -- "$releases")
+    begin_state_identity=$(stat -c '%d:%i' -- "$state_root")
     local now acquired=false
     now=$(date +%s)
     if mkdir "$lock" 2>/dev/null; then acquired=true; fi
@@ -721,35 +808,44 @@ begin() {
         echo "Verify that the owning run and all remote PHP processes have stopped before manually recovering this lock." >&2
         exit 1
     }
+    begin_lock_identity='' begin_transaction_identity='' begin_candidate_identity=''
+    begin_transaction_created=false begin_candidate_created=false
+    # Keep errexit active in the initialization body; a conditional function call
+    # would suppress it inside write_value and could conceal failed writes.
+    trap 'cleanup_begin "$?"' EXIT
+    begin_lock_identity=$(stat -c '%d:%i' -- "$lock")
     printf '%s\n' "$release_id" >"$lock/owner"
     # Preserve evidence of every newer writer after its transaction is finalized.
     # Post-unlock diagnostics can then distinguish legitimate supersession from drift.
-    local generation_temp=''
+    local generation_temp='' generation_temp_identity=''
     if ! {
         generation_temp=$(mktemp "$control/.generation.XXXXXX") \
+            && generation_temp_identity=$(stat -c '%d:%i' -- "$generation_temp") \
             && printf '%s\n' "$release_id" >"$generation_temp" \
             && chmod 600 "$generation_temp" \
             && mv -T -- "$generation_temp" "$control/generation" \
             && printf '%s\n' "$now" >"$lock/started" \
             && printf '%s\n' "$lock_seconds" >"$lock/requested-timeout"
     }; then
-        if [ -n "$generation_temp" ]; then rm -f -- "$generation_temp"; fi
-        if [ -f "$lock/owner" ] && [ ! -L "$lock/owner" ] && [ "$(cat "$lock/owner")" = "$release_id" ]; then rm -rf -- "$lock"; fi
-        echo '::error::Could not publish deployment generation; owned lock released.' >&2
+        if [ -n "$generation_temp" ] && begin_lock_matches \
+            && [ -f "$generation_temp" ] && [ ! -L "$generation_temp" ] \
+            && [ "$(stat -c '%d:%i' -- "$generation_temp")" = "$generation_temp_identity" ]; then
+            rm -f -- "$generation_temp"
+        fi
+        echo '::error::Could not publish deployment generation.' >&2
         exit 1
     fi
 
     if [ -e "$transaction" ] || [ -e "$candidate" ] || [ -L "$candidate" ]; then
-        rm -rf "$lock"
         echo "::error::Release '$release_id' already exists; use a unique run attempt." >&2
         exit 1
     fi
-    if ! install -d -m 700 "$transaction" || ! install -d -m 755 "$candidate"; then
-        if [ -f "$lock/owner" ] && [ "$(cat "$lock/owner")" = "$release_id" ]; then rm -rf "$lock"; fi
-        rm -rf "$transaction" "$candidate"
-        echo "::error::Could not initialize the deployment transaction." >&2
-        exit 1
-    fi
+    mkdir -m 700 -- "$transaction"
+    begin_transaction_created=true
+    begin_transaction_identity=$(stat -c '%d:%i' -- "$transaction")
+    mkdir -m 755 -- "$candidate"
+    begin_candidate_created=true
+    begin_candidate_identity=$(stat -c '%d:%i' -- "$candidate")
     printf '%s\n' "$@" >"$transaction/persistent-paths"
     write_value commit "$commit"
     write_value retain "$retain"
@@ -769,12 +865,10 @@ begin() {
         none) write_value previous_target "$selected" ;;
         legacy)
             if [ -z "$initial_live_commit" ]; then
-                rm -rf "$candidate" "$transaction" "$lock"
                 echo "::error::initial-live-commit is required when converting an existing in-place deployment." >&2
                 exit 1
             fi
             if [ -L "$control/legacy-live-commit" ] || { [ -e "$control/legacy-live-commit" ] && [ ! -f "$control/legacy-live-commit" ]; }; then
-                rm -rf "$candidate" "$transaction" "$lock"
                 echo "::error::The trusted legacy commit record has an unsafe type." >&2
                 exit 1
             fi
@@ -785,20 +879,20 @@ begin() {
             write_value previous_target "$selected" ;;
         stable)
             if [ "$layout" != stable-directory ]; then
-                rm -rf "$candidate" "$transaction" "$lock"
                 echo "::error::A managed real stable directory requires atomic-layout stable-directory." >&2
                 exit 1
             fi
             previous_release=$(metadata_value "$stable" release || true)
             previous_commit=$(metadata_value "$stable" commit || true)
-            plain_name "$previous_release" || { rm -rf "$candidate" "$transaction" "$lock"; echo "::error::Managed real directory has invalid release metadata." >&2; exit 1; }
-            [[ $previous_commit =~ ^[0-9A-Fa-f]{7,64}$ ]] || { rm -rf "$candidate" "$transaction" "$lock"; echo "::error::Managed real directory has invalid commit metadata." >&2; exit 1; }
+            plain_name "$previous_release" || { echo "::error::Managed real directory has invalid release metadata." >&2; exit 1; }
+            [[ $previous_commit =~ ^[0-9A-Fa-f]{7,64}$ ]] || { echo "::error::Managed real directory has invalid commit metadata." >&2; exit 1; }
             write_value previous_release "$previous_release"
             write_value previous_commit "$previous_commit"
             write_value previous_target "$selected" ;;
-        invalid) rm -rf "$candidate" "$transaction" "$lock"; echo "::error::~/$app_name is neither absent, a Laravel app, nor a managed release symlink." >&2; exit 1 ;;
-        *) validate_release_target "$selected" || { rm -rf "$candidate" "$transaction" "$lock"; echo "::error::Stable symlink target '$selected' is outside the managed release tree." >&2; exit 1; }; write_value previous_target "$selected" ;;
+        invalid) echo "::error::~/$app_name is neither absent, a Laravel app, nor a managed release symlink." >&2; exit 1 ;;
+        *) validate_release_target "$selected" || { echo "::error::Stable symlink target '$selected' is outside the managed release tree." >&2; exit 1; }; write_value previous_target "$selected" ;;
     esac
+    trap - EXIT
     echo "Started atomic release $release_id for $app_name; previous selection: $selected."
 }
 

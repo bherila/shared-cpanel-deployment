@@ -275,6 +275,12 @@ and remote processes have stopped, an operator must recover/remove an abandoned 
 Every successfully finalized failure becomes retention-eligible; cleanup preserves the live release,
 the prior release and genuinely incomplete transactions.
 
+Initialization failures before upload clean up only this invocation's candidate, transaction and lock,
+after proving their directory identities and the exact lock owner. Cleanup uses sibling renames without
+allocating new directories or metadata files, so a persistent metadata-allocation failure does not
+prevent releasing a proven owner. Changed ancestors, replacement directories, an incomplete owner
+record, or a failed cleanup rename retain the lock and recovery evidence for deliberate inspection.
+
 ## What the guards refuse
 
 **Upload.** Atomic mode (`scripts/rsync-atomic-release.sh`) only writes the exact empty candidate created
@@ -446,6 +452,7 @@ migration; incompatible schema risk correctly leaves the old selected code down.
 ```sh
 shellcheck scripts/*.sh
 bash scripts/test-atomic-release.sh
+bash scripts/test-atomic-begin-cleanup.sh
 bash scripts/test-action-contract.sh
 bash scripts/test-install-cron.sh
 bash scripts/test-prepare-cron-lines.sh
