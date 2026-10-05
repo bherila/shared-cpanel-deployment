@@ -75,7 +75,9 @@ for address in "${addresses[@]}"; do
     : >"$body"
     # A transfer curl reports as failed (timed out or cut off after a 2xx header) is no answer,
     # whatever status --write-out printed: a partial body must never pass a check.
-    if ! meta=$(curl --silent --insecure --max-time "$remaining" \
+    # --noproxy: an account-level HTTPS_PROXY or ALL_PROXY would carry the request back through the
+    # public name, and through the CDN this exists to bypass.
+    if ! meta=$(curl --silent --insecure --noproxy '*' --max-time "$remaining" \
         --resolve "$host:$port:$address" \
         --header 'Cache-Control: no-cache' \
         --output "$body" --write-out '%{http_code}|%{content_type}' \

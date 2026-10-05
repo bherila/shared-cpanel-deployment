@@ -23,6 +23,7 @@ while [ "$#" -gt 0 ]; do
         --output) output=$2; shift ;;
         --resolve) resolve=$2; printf '%s\n' "$2" >>"$FIXTURE/resolves"; shift ;;
         --insecure) touch "$FIXTURE/insecure" ;;
+        --noproxy) [ "$2" = '*' ] && touch "$FIXTURE/noproxy"; shift ;;
     esac
     shift
 done
@@ -47,6 +48,7 @@ out=$(bash "$here/origin-fetch.sh" site.example.test /up 5)
 [ "$(cat "$fixture/resolves")" = $'site.example.test:443:192.0.2.10\nsite.example.test:443:198.51.100.7' ] \
     || fail 'own IPv4 addresses are tried in order and the first answer wins'
 [ -f "$fixture/insecure" ] || fail 'the host talking to itself does not verify TLS'
+[ -f "$fixture/noproxy" ] || fail 'no configured proxy is used for the origin request'
 echo 'ok - the first own address that answers is used, IPv6 skipped'
 
 # A 2xx header followed by a timeout is no answer: the next address is tried instead.
