@@ -447,6 +447,7 @@ migration; incompatible schema risk correctly leaves the old selected code down.
 shellcheck scripts/*.sh
 bash scripts/test-atomic-release.sh
 bash scripts/test-action-contract.sh
+bash scripts/test-no-process-substitution.sh
 bash scripts/test-install-cron.sh
 bash scripts/test-prepare-cron-lines.sh
 bash scripts/test-rsync-atomic-release.sh
@@ -463,6 +464,14 @@ bash scripts/test-install-branding.sh
 ```
 
 Release by tagging `vX.Y.Z`; callers pin the tag's commit SHA.
+
+Remote shell scripts must avoid process substitution: CageFS hosts may not expose
+`/dev/fd` to commands consuming the generated paths. The action contract checks the
+remote deployment scripts with ShellCheck's parser for both input and output forms,
+while allowing ordinary redirects, comparisons and quoted data. Check a new remote
+helper with `bash scripts/assert-no-process-substitution.sh path/to/helper.sh` and
+include that invocation in its contract harness. This is a runner/CI check; it adds
+no ShellCheck dependency to the remote host.
 
 ### Canonical runtime audit
 
