@@ -422,8 +422,15 @@ matches the fixed aggregate protocol. No descendant can keep an SSH pipe open th
 Generated config is decoded using a bounded scalar-array grammar before bootstrap; executable cache
 content is rejected without execution. Laravel loads a private regenerated snapshot of those decoded
 bytes, not the original cache file, preventing a validation/re-require race. No live cache is changed.
-If the original cache is absent, the private path stays absent and source configuration is loaded;
-a late-created original cache is never loaded during this audit.
+Selection follows Laravel 12/13 precedence: an existing externally selected or default cache
+suppresses dotenv loading. When that initial path is absent, the framework's dotenv phase runs
+once (including externally selected `APP_ENV` files), then the audit resolves any dotenv-only
+`APP_CONFIG_CACHE`. Externally supplied cache paths retain precedence over dotenv. The captured
+absence of an unchanged path is preserved, so a late-created original cache is never loaded.
+A selected absent cache loads source configuration through a private absent path. A custom
+pre-bound environment bootstrapper or a cache-path override that cannot be isolated fails closed.
+The canonical `runtime-audit` remains stricter: it requires the selected real
+`bootstrap/cache/config.php` under the stable directory and explicitly rejects custom cache paths.
 Services, packages, routes and events cache paths are also frozen to private scratch paths before
 application creation. Package/provider manifests are regenerated there from trusted candidate source
 and Composer metadata; writable original bootstrap caches are never executed or changed.
