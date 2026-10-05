@@ -72,14 +72,39 @@ mktemp() {
     if [ "$FAULT_COMMAND" = mktemp ] && matches_field "${!#}"; then inject_fault; return 91; fi
     "$REAL_MKTEMP" "$@"
 }
+chmod() {
+    local target=${!#}
+    if [ "$FAULT_COMMAND" = chmod ]; then
+        case "$FAULT_FIELD:$target" in
+            transaction:"$HOME/.deployments/app/state/failed"|candidate:"$HOME/.deployments/app/releases/failed") inject_fault; return 91 ;;
+        esac
+    fi
+    command chmod "$@"
+}
+mkdir() {
+    local target=${!#}
+    if [ "$FAULT_COMMAND" = mkdir-after ]; then
+        case "$FAULT_FIELD:$target" in
+            transaction:"$HOME/.deployments/app/state/failed"|candidate:"$HOME/.deployments/app/releases/failed") command mkdir "$@"; inject_fault; return 91 ;;
+        esac
+    fi
+    command mkdir "$@"
+}
 mv() {
+    if [ "$FAULT_COMMAND" = cross-parent-quota ] && [ -f "$FIXTURE_ROOT/hit" ]; then
+        # A metadata-exhausted control directory must never receive an entry
+        # from releases/ or state/. Same-parent renames remain available.
+        local source destination
+        source=${@: -2:1}; destination=${!#}
+        if [ "${source%/*}" != "${destination%/*}" ]; then return 91; fi
+    fi
     if [ "$FAULT_COMMAND" = persistent-mv ] && { matches_field "${!#}" || [ -f "$FIXTURE_ROOT/hit" ]; }; then inject_fault; return 91; fi
-    if [ "$FAULT_COMMAND" = mv ] && matches_field "${!#}"; then inject_fault; return 91; fi
+    if { [ "$FAULT_COMMAND" = mv ] || [ "$FAULT_COMMAND" = cross-parent-quota ]; } && matches_field "${!#}"; then inject_fault; return 91; fi
     case ${REPLACE:-none} in
         detach-*|owner-before-*)
             boundary=${REPLACE#detach-}; boundary=${boundary#owner-before-}
             case ${!#} in
-                "$HOME/.deployments/app/.begin-cleanup-"*"-$boundary")
+                */.begin-cleanup-*"-$boundary")
                     if [ ! -f "$FIXTURE_ROOT/detach-hit" ]; then
                         touch "$FIXTURE_ROOT/detach-hit"
                         if [[ $REPLACE == detach-* ]]; then
@@ -188,6 +213,24 @@ test -d "$HOME/.deployments/app/state/failed"
 test -d "$HOME/.deployments/app/releases/failed"
 checks=$((checks + 1))
 
+for field in transaction candidate; do
+    setup
+    export FAULT_COMMAND=mkdir-after FAULT_FIELD="$field" REPLACE=none
+    run_fault
+    test -d "$HOME/.deployments/app/deploy.lock"
+    test -d "$HOME/.deployments/app/state/failed"
+    if [ "$field" = candidate ]; then test -d "$HOME/.deployments/app/releases/failed"; fi
+    if bash "$here/atomic-release.sh" begin app retry "$commit" 7200 3 maintenance "$commit" stable-directory storage >/dev/null 2>&1; then exit 1; fi
+    checks=$((checks + 1))
+    setup
+    export FAULT_COMMAND=chmod FAULT_FIELD="$field" REPLACE=none
+    run_fault
+    assert_reacquire
+done
+setup
+export FAULT_COMMAND=cross-parent-quota FAULT_FIELD=phase REPLACE=none
+run_fault
+assert_reacquire
 for replacement in detach-candidate detach-transaction detach-lock owner-before-candidate owner-before-transaction owner-before-lock; do
     setup
     export FAULT_COMMAND=mv FAULT_FIELD=phase REPLACE="$replacement"
@@ -244,4 +287,13 @@ SH
     bash "$here/atomic-release.sh" begin app retry "$commit" 7200 3 maintenance "$commit" stable-directory storage >/dev/null
     checks=$((checks + 1))
 done
+setup
+mkdir -p "$HOME/.deployments/app/state"
+ln -s "$fixture/foreign-absent" "$HOME/.deployments/app/state/failed"
+if bash "$here/atomic-release.sh" begin app failed "$commit" 7200 3 maintenance "$commit" stable-directory storage >"$fixture/output" 2>&1; then exit 1; fi
+test ! -e "$HOME/.deployments/app/deploy.lock"
+test -L "$HOME/.deployments/app/state/failed"
+test "$(readlink "$HOME/.deployments/app/state/failed")" = "$fixture/foreign-absent"
+bash "$here/atomic-release.sh" begin app retry "$commit" 7200 3 maintenance "$commit" stable-directory storage >/dev/null
+checks=$((checks + 1))
 echo "ok - $checks initialization fault/ownership cases; later acquisition and app preservation proven"

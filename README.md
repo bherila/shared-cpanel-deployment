@@ -133,8 +133,8 @@ implicit behavior change.
 Outputs: `ssh-target`, `php-binary`, `release-id`, `live-release`, `live-commit` and `live-state`.
 
 The web PHP check requires the temporary probe's exact runtime response. Fetch failures and
-malformed responses (including HTTP 200 HTML pages from routing or intermediary errors) get three
-attempts, with a 20-second limit per request and two seconds between attempts. A valid response with
+malformed responses (including HTTP 200 HTML pages from routing or intermediary errors) get up to eight
+attempts with backoff under one 75-second deadline and a maximum 20 seconds per request. A valid response with
 the wrong PHP version or insufficient memory fails immediately. Malformed-response diagnostics show
 the HTTP status and MIME type, never the response body; check document-root and proxy routing if the
 probe never returns its fields. The temporary remote probe and local response file are removed on exit.
@@ -230,7 +230,8 @@ The atomic order is:
    revalidate/create `webroot-symlink`, then run `post-activate-script <stable> <php> <candidate>` while
    maintenance remains;
 8. run `artisan up`, prove Laravel is serving, and only then install or restore application cron;
-9. run built-in HTTP/PHP checks, then `verification-script` on the runner.
+9. run site health, prove the exact selected atomic identity, run `verification-script` on the runner,
+   and then check web PHP. In-place mode retains its after-PHP application verification timing.
 
 The runner verification environment includes `DEPLOY_SSH_TARGET`, `DEPLOY_PHP_BINARY`, `DEPLOY_DIR`,
 `DEPLOY_STABLE_DIR`, `DEPLOY_CANDIDATE_DIR`, `DEPLOY_SITE_URL`, `DEPLOY_RELEASE_ID`,
@@ -256,10 +257,16 @@ paused, old code is down, and the worker-drain hook passed. From that point unti
 and `artisan up`, no release is intentionally served. A failed or partially applied migration under
 the default `failure-policy: maintenance` leaves
 the **old selected release** in maintenance. A failure after selection leaves the candidate selected in
-maintenance, unless it had already served and passed `health-path`: a candidate the
-action brought up and then proved healthy is left serving, uncommitted and with its cron, when a later
-read-only check (the web PHP probe, `verification-script`) fails. The run still fails. That exception
-applies only to `failure-policy: maintenance`; `rollback` behaves as configured. The paused application cron lines are preserved privately under
+maintenance, unless the action proved the exact serving candidate, passed configured `health-path`
+and a nonempty application-specific `verification-script`, then classified web PHP as verified,
+explicitly disabled, or inconclusive. HTTP 200 alone never grants this exception: the application
+verifier must prove its public contract and fail on intermediary/error responses. An inconclusive
+PHP probe after that application proof leaves the candidate serving, uncommitted and with its cron;
+the run still fails. Missing/failed application verification, disabled health, probe usage errors,
+and definitive wrong PHP/memory never grant preservation. No healthy marker is written before the
+PHP classification, so even failed defensive revocation cannot turn a definitive mismatch into
+an eligible inconclusive result. The exception applies only to `failure-policy: maintenance`;
+`rollback` behaves as configured. The paused application cron lines are preserved privately under
 `~/.deployments/<deploy-dir>/recovery/<release-id>.cron` for manual recovery, even after the deployment
 transaction unlocks. Selection and service state are always reported separately.
 
@@ -462,6 +469,7 @@ bash scripts/test-atomic-release.sh
 bash scripts/test-atomic-begin-cleanup.sh
 bash scripts/test-action-contract.sh
 bash scripts/test-no-process-substitution.sh
+python3 scripts/test-live-verification.py
 bash scripts/test-install-cron.sh
 bash scripts/test-prepare-cron-lines.sh
 bash scripts/test-rsync-atomic-release.sh

@@ -706,10 +706,22 @@ cleanup_begin() {
     local status=$1 path identity name detached
     # A release directory may use the filesystem's whole 255-byte component.
     # Device/inode numbers and PID keep detach names bounded independently.
-    local prefix="$control/.begin-cleanup-${begin_lock_identity//:/-}-$$"
+    local prefix=".begin-cleanup-${begin_lock_identity//:/-}-$$"
+    local candidate_detached="$releases/$prefix-candidate" transaction_detached="$state_root/$prefix-transaction" lock_detached="$control/$prefix-lock"
     [ "$status" -ne 0 ] || return 0
     echo '::error::Deployment initialization failed; checking owned initialization directories.' >&2
     begin_lock_matches || { echo '::warning::Initialization ownership is uncertain; lock and evidence retained.' >&2; return 0; }
+    # mkdir can create a directory and still fail before returning success.
+    # Without a captured inode, keep any existing path and the canonical lock.
+    # If no directory exists, the failed creation needs nothing removed.
+    if [ "$begin_transaction_created" = true ] && [ -z "$begin_transaction_identity" ]; then
+        if [ -e "$transaction" ] || [ -L "$transaction" ]; then return 0; fi
+        begin_transaction_created=false
+    fi
+    if [ "$begin_candidate_created" = true ] && [ -z "$begin_candidate_identity" ]; then
+        if [ -e "$candidate" ] || [ -L "$candidate" ]; then return 0; fi
+        begin_candidate_created=false
+    fi
     if [ "$begin_transaction_created" = true ]; then
         begin_directory_matches "$transaction" "$begin_transaction_identity" || return 0
     fi
@@ -718,13 +730,12 @@ cleanup_begin() {
     fi
     for name in candidate transaction lock; do
         case $name in
-            candidate) [ "$begin_candidate_created" = true ] || continue; path=$candidate; identity=$begin_candidate_identity ;;
-            transaction) [ "$begin_transaction_created" = true ] || continue; path=$transaction; identity=$begin_transaction_identity ;;
-            lock) path=$lock; identity=$begin_lock_identity ;;
+            candidate) [ "$begin_candidate_created" = true ] || continue; path=$candidate; identity=$begin_candidate_identity; detached=$candidate_detached ;;
+            transaction) [ "$begin_transaction_created" = true ] || continue; path=$transaction; identity=$begin_transaction_identity; detached=$transaction_detached ;;
+            lock) path=$lock; identity=$begin_lock_identity; detached=$lock_detached ;;
         esac
-        detached="$prefix-$name"
-        # Renaming into sibling names allocates no directory inode or metadata
-        # file, so persistent mktemp/quota failures do not disable cleanup.
+        # Rename within each original parent, avoiding entries in a different
+        # directory and allocating no directory inode or metadata file.
         # No-clobber protects prior recovery evidence at these unique names.
         [ ! -e "$detached" ] && [ ! -L "$detached" ] || return 0
         begin_lock_matches && begin_directory_matches "$path" "$identity" || return 0
@@ -736,30 +747,30 @@ cleanup_begin() {
         if [ "$name" != lock ]; then begin_lock_matches || return 0; fi
     done
     if ! { begin_ancestors_match \
-        && begin_directory_matches "$prefix-lock" "$begin_lock_identity" \
-        && [ -f "$prefix-lock/owner" ] && [ ! -L "$prefix-lock/owner" ] \
-        && printf '%s\n' "$release_id" | cmp -s -- "$prefix-lock/owner" -; }; then
-        mv -T -n -- "$prefix-lock" "$lock" || true
+        && begin_directory_matches "$lock_detached" "$begin_lock_identity" \
+        && [ -f "$lock_detached/owner" ] && [ ! -L "$lock_detached/owner" ] \
+        && printf '%s\n' "$release_id" | cmp -s -- "$lock_detached/owner" -; }; then
+        mv -T -n -- "$lock_detached" "$lock" || true
         return 0
     fi
     # Recheck every detached inode before removal. Any mismatch keeps the lock
     # as a blocker where possible and leaves all uncertain evidence untouched.
     if [ "$begin_candidate_created" = true ]; then
-        if ! begin_directory_matches "$prefix-candidate" "$begin_candidate_identity"; then
-            mv -T -n -- "$prefix-lock" "$lock" || true; return 0
+        if ! begin_directory_matches "$candidate_detached" "$begin_candidate_identity"; then
+            mv -T -n -- "$lock_detached" "$lock" || true; return 0
         fi
     fi
     if [ "$begin_transaction_created" = true ]; then
-        if ! begin_directory_matches "$prefix-transaction" "$begin_transaction_identity"; then
-            mv -T -n -- "$prefix-lock" "$lock" || true; return 0
+        if ! begin_directory_matches "$transaction_detached" "$begin_transaction_identity"; then
+            mv -T -n -- "$lock_detached" "$lock" || true; return 0
         fi
     fi
-    if { [ "$begin_candidate_created" != true ] || rm -rf -- "$prefix-candidate"; } \
-        && { [ "$begin_transaction_created" != true ] || rm -rf -- "$prefix-transaction"; }; then
-        rm -rf -- "$prefix-lock" || { mv -T -n -- "$prefix-lock" "$lock" || true; return 0; }
+    if { [ "$begin_candidate_created" != true ] || rm -rf -- "$candidate_detached"; } \
+        && { [ "$begin_transaction_created" != true ] || rm -rf -- "$transaction_detached"; }; then
+        rm -rf -- "$lock_detached" || { mv -T -n -- "$lock_detached" "$lock" || true; return 0; }
         echo 'Released the failed initialization transaction and its owned lock.' >&2
     else
-        mv -T -n -- "$prefix-lock" "$lock" || true
+        mv -T -n -- "$lock_detached" "$lock" || true
     fi
 }
 
@@ -838,16 +849,18 @@ begin() {
         exit 1
     fi
 
-    if [ -e "$transaction" ] || [ -e "$candidate" ] || [ -L "$candidate" ]; then
+    if [ -e "$transaction" ] || [ -L "$transaction" ] || [ -e "$candidate" ] || [ -L "$candidate" ]; then
         echo "::error::Release '$release_id' already exists; use a unique run attempt." >&2
         exit 1
     fi
-    mkdir -m 700 -- "$transaction"
     begin_transaction_created=true
+    mkdir -- "$transaction"
     begin_transaction_identity=$(stat -c '%d:%i' -- "$transaction")
-    mkdir -m 755 -- "$candidate"
+    chmod 700 -- "$transaction"
     begin_candidate_created=true
+    mkdir -- "$candidate"
     begin_candidate_identity=$(stat -c '%d:%i' -- "$candidate")
+    chmod 755 -- "$candidate"
     printf '%s\n' "$@" >"$transaction/persistent-paths"
     write_value commit "$commit"
     write_value retain "$retain"
@@ -1204,8 +1217,8 @@ serve() {
     echo "Release $release_id is selected and serving; live verification may begin."
 }
 
-# Record that the selected candidate served and passed the site's own health
-# check. Under failure-policy maintenance, a later read-only verification
+# Record the action's successful site health and application-specific proof
+# after classifying the PHP probe as verified or inconclusive. Under failure-policy maintenance, a later read-only verification
 # failure then leaves it serving rather than taking a healthy site down.
 mark_healthy() {
     if [ "$#" -ne 0 ]; then
@@ -1217,7 +1230,7 @@ mark_healthy() {
     read_value phase
     [ "$REPLY" = serving ] || { echo "::error::Only a serving candidate can be marked healthy." >&2; exit 1; }
     write_value served_healthy true
-    echo "Release $release_id served and passed its health check."
+    echo "Release $release_id served and passed site health and application-specific verification."
 }
 
 # Withdraw the healthy mark: the web handler answered with the wrong runtime,
@@ -1427,10 +1440,10 @@ finalize() {
     read_value served_healthy && served_healthy=$REPLY
     read_value left_serving && left_serving=$REPLY
 
-    # A candidate that already served and passed the health check is left
-    # serving when a later read-only check fails (a flaky probe took a healthy
-    # site down on 2026-10-05). Maintenance is for failures that can leave the
-    # schema and code disagreeing; this is not one. Rollback keeps its meaning.
+    # The action marks only after exact serving identity, site health and
+    # application-specific proof, plus a verified/disabled/inconclusive PHP
+    # classification. Such a candidate can survive a later read-only failure.
+    # Maintenance still applies before that proof. Rollback keeps its meaning.
     #
     # The decision is durable (left_serving) before anything else is written, so
     # a finalizer retried after phase=finalized, or after a failed cleanup that

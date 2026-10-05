@@ -266,8 +266,9 @@ inputs:
     default: 'false'
   verification-script:
     description: >-
-      Optional script from the checkout run on the Actions runner after live HTTP/PHP checks. It receives
-      deployment details through DEPLOY_* environment variables and may perform OAuth, MCP, queue or other probes.
+      Optional script from the checkout run on the Actions runner after site health and exact atomic status,
+      before the web PHP probe (in-place mode keeps its after-PHP timing). It must prove application-specific
+      public health and receives DEPLOY_* details for OAuth, MCP, queue or other probes.
     required: false
     default: ''
 
@@ -1159,7 +1160,8 @@ runs:
         ssh "$TARGET" "bash -s -- $(printf '%q ' restore-cron "$DEPLOY_DIR" "$RELEASE_ID")" \
           <"$GITHUB_ACTION_PATH/scripts/atomic-release.sh"
 
-    - name: Verify site health
+    - id: site-health
+      name: Verify site health
       if: inputs.health-path != ''
       shell: bash
       env:
@@ -1174,42 +1176,6 @@ runs:
         curl --fail --silent --show-error --retry 3 --retry-all-errors --max-time 20 \
           "${SITE_URL%/}$HEALTH_PATH" >/dev/null
         echo "Healthy: ${SITE_URL%/}$HEALTH_PATH"
-
-    - name: Record that the selected atomic release served healthily
-      if: inputs.deployment-mode == 'atomic' && inputs.health-path != ''
-      shell: bash
-      env:
-        TARGET: ${{ steps.ssh.outputs.target }}
-        DEPLOY_DIR: ${{ inputs.deploy-dir }}
-        RELEASE_ID: ${{ steps.resolve.outputs.release-id }}
-      run: |
-        set -euo pipefail
-        ssh "$TARGET" "bash -s -- $(printf '%q ' mark-healthy "$DEPLOY_DIR" "$RELEASE_ID")" \
-          <"$GITHUB_ACTION_PATH/scripts/atomic-release.sh"
-
-    - name: Verify the web handler's PHP version and memory limit
-      if: inputs.verify-web-php == 'true'
-      shell: bash
-      env:
-        TARGET: ${{ steps.ssh.outputs.target }}
-        DEPLOY_DIR: ${{ inputs.deploy-dir }}
-        SITE_URL: ${{ inputs.site-url }}
-        PHP_VERSION_WANTED: ${{ inputs.php-version }}
-        MIN_MEMORY: ${{ inputs.web-memory-limit || '128M' }}
-        DEPLOYMENT_MODE: ${{ inputs.deployment-mode }}
-        RELEASE_ID: ${{ steps.resolve.outputs.release-id }}
-      run: |
-        set -uo pipefail
-        status=0
-        bash "$GITHUB_ACTION_PATH/scripts/verify-web-php.sh" "$TARGET" "$DEPLOY_DIR" "$SITE_URL" "$PHP_VERSION_WANTED" "$MIN_MEMORY" || status=$?
-        # 3 is definitive: the handler answered with the wrong runtime. A healthy
-        # release is kept serving only through an inconclusive probe, so withdraw
-        # the mark and let failure-policy apply.
-        if [ "$status" -eq 3 ] && [ "$DEPLOYMENT_MODE" = atomic ]; then
-          ssh "$TARGET" "bash -s -- $(printf '%q ' unmark-healthy "$DEPLOY_DIR" "$RELEASE_ID")" \
-            <"$GITHUB_ACTION_PATH/scripts/atomic-release.sh" || status=1
-        fi
-        exit "$status"
 
     - id: atomic-live-status
       name: Read the selected atomic release status
@@ -1240,8 +1206,80 @@ runs:
             exit 1
         fi
 
+    - id: atomic-live-verification
+      name: Run atomic application-specific live verification
+      if: inputs.deployment-mode == 'atomic' && inputs.verification-script != ''
+      shell: bash
+      env:
+        SCRIPT: ${{ inputs.verification-script }}
+        DEPLOY_SSH_TARGET: ${{ steps.ssh.outputs.target }}
+        DEPLOY_PHP_BINARY: ${{ steps.resolve.outputs.php }}
+        DEPLOY_DIR: ${{ inputs.deploy-dir }}
+        DEPLOY_STABLE_DIR: ${{ inputs.deploy-dir }}
+        DEPLOY_SITE_URL: ${{ inputs.site-url }}
+        DEPLOY_RELEASE_ID: ${{ steps.resolve.outputs.release-id }}
+        DEPLOY_CANDIDATE_DIR: ${{ inputs.deployment-mode == 'atomic' && inputs.atomic-layout == 'stable-directory' && inputs.deploy-dir || steps.resolve.outputs.app-dir }}
+        DEPLOY_SOURCE_COMMIT: ${{ github.sha }}
+        DEPLOY_LIVE_RELEASE: ${{ steps.atomic-live-status.outputs.live_release }}
+        DEPLOY_LIVE_COMMIT: ${{ steps.atomic-live-status.outputs.live_commit }}
+        DEPLOY_LIVE_STATE: ${{ steps.atomic-live-status.outputs.live_state }}
+        DEPLOYMENT_MODE: ${{ inputs.deployment-mode }}
+      run: |
+        set -euo pipefail
+        [ -f "$SCRIPT" ] || { echo "::error::verification-script '$SCRIPT' does not exist in the checkout." >&2; exit 2; }
+        bash "$SCRIPT"
+
+    - name: Verify the web handler's PHP version and memory limit
+      if: inputs.verify-web-php == 'true'
+      shell: bash
+      env:
+        TARGET: ${{ steps.ssh.outputs.target }}
+        DEPLOY_DIR: ${{ inputs.deploy-dir }}
+        SITE_URL: ${{ inputs.site-url }}
+        PHP_VERSION_WANTED: ${{ inputs.php-version }}
+        MIN_MEMORY: ${{ inputs.web-memory-limit || '128M' }}
+        DEPLOYMENT_MODE: ${{ inputs.deployment-mode }}
+        RELEASE_ID: ${{ steps.resolve.outputs.release-id }}
+        HEALTH_PATH: ${{ inputs.health-path }}
+        APPLICATION_VERIFIER: ${{ inputs.verification-script }}
+        HEALTH_PROVEN: ${{ steps.site-health.outcome }}
+        APPLICATION_PROVEN: ${{ steps.atomic-live-verification.outcome }}
+      run: |
+        set -uo pipefail
+        status=0
+        bash "$GITHUB_ACTION_PATH/scripts/verify-web-php.sh" "$TARGET" "$DEPLOY_DIR" "$SITE_URL" "$PHP_VERSION_WANTED" "$MIN_MEMORY" || status=$?
+        # No healthy marker exists before the probe is classified. Only an
+        # inconclusive probe after application proof can preserve availability;
+        # the failed result still propagates and the candidate is not committed.
+        if [ "$status" -eq 1 ] && [ "$DEPLOYMENT_MODE" = atomic ] \
+          && [ -n "$HEALTH_PATH" ] && [ -n "$APPLICATION_VERIFIER" ] \
+          && [ "$HEALTH_PROVEN" = success ] && [ "$APPLICATION_PROVEN" = success ]; then
+          ssh "$TARGET" "bash -s -- $(printf '%q ' mark-healthy "$DEPLOY_DIR" "$RELEASE_ID")" \
+            <"$GITHUB_ACTION_PATH/scripts/atomic-release.sh" || exit 1
+        fi
+        # A definitive mismatch is never marked. Defensive revocation must not
+        # turn classification 3 into an eligible inconclusive classification 1.
+        if [ "$status" -eq 3 ] && [ "$DEPLOYMENT_MODE" = atomic ]; then
+          ssh "$TARGET" "bash -s -- $(printf '%q ' unmark-healthy "$DEPLOY_DIR" "$RELEASE_ID")" \
+            <"$GITHUB_ACTION_PATH/scripts/atomic-release.sh" \
+            || echo '::error::Could not revoke the healthy marker after a definitive PHP mismatch.' >&2
+        fi
+        exit "$status"
+
+    - name: Record that the selected atomic release served healthily
+      if: inputs.deployment-mode == 'atomic' && inputs.health-path != '' && inputs.verification-script != '' && steps.site-health.outcome == 'success' && steps.atomic-live-verification.outcome == 'success'
+      shell: bash
+      env:
+        TARGET: ${{ steps.ssh.outputs.target }}
+        DEPLOY_DIR: ${{ inputs.deploy-dir }}
+        RELEASE_ID: ${{ steps.resolve.outputs.release-id }}
+      run: |
+        set -euo pipefail
+        ssh "$TARGET" "bash -s -- $(printf '%q ' mark-healthy "$DEPLOY_DIR" "$RELEASE_ID")" \
+          <"$GITHUB_ACTION_PATH/scripts/atomic-release.sh"
+
     - name: Run application-specific live verification
-      if: inputs.verification-script != ''
+      if: inputs.deployment-mode == 'in-place' && inputs.verification-script != ''
       shell: bash
       env:
         SCRIPT: ${{ inputs.verification-script }}
