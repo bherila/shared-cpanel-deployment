@@ -501,7 +501,7 @@ runs:
           >"$cron_file"
         mapfile -t lines <"$cron_file"
         bash "$GITHUB_ACTION_PATH/scripts/install-cron.sh" --validate-only "$DEPLOY_DIR" "${lines[@]}"
-        digest=$(sha256sum "$cron_file"); digest=${digest%% *}
+        digest=$(printf '%s\n' "${lines[@]}" | sha256sum); digest=${digest%% *}
         echo "file=$cron_file" >>"$GITHUB_OUTPUT"
         echo "sha256=$digest" >>"$GITHUB_OUTPUT"
         trap - EXIT
@@ -1015,9 +1015,11 @@ runs:
       run: |
         set -euo pipefail
         [ -f "$CRON_FILE" ] && [ ! -L "$CRON_FILE" ] || { echo '::error::Validated cron artifact is unavailable.' >&2; exit 2; }
-        digest=$(sha256sum "$CRON_FILE"); digest=${digest%% *}
-        [ "$digest" = "$CRON_SHA256" ] || { echo '::error::Validated cron artifact changed after preflight.' >&2; exit 2; }
         mapfile -t lines <"$CRON_FILE"
+        # Hash the exact arguments being sent, rather than reopening a pathname
+        # whose bytes could change between checksum and read.
+        digest=$(printf '%s\n' "${lines[@]}" | sha256sum); digest=${digest%% *}
+        [ "$digest" = "$CRON_SHA256" ] || { echo '::error::Validated cron artifact changed after preflight.' >&2; exit 2; }
         ssh "$TARGET" "bash -s -- $(printf '%q ' "$DEPLOY_DIR" "${lines[@]}")" \
           <"$GITHUB_ACTION_PATH/scripts/install-cron.sh"
 
@@ -1177,9 +1179,11 @@ runs:
       run: |
         set -euo pipefail
         [ -f "$CRON_FILE" ] && [ ! -L "$CRON_FILE" ] || { echo '::error::Validated cron artifact is unavailable.' >&2; exit 2; }
-        digest=$(sha256sum "$CRON_FILE"); digest=${digest%% *}
-        [ "$digest" = "$CRON_SHA256" ] || { echo '::error::Validated cron artifact changed after preflight.' >&2; exit 2; }
         mapfile -t lines <"$CRON_FILE"
+        # Hash the exact arguments being sent, rather than reopening a pathname
+        # whose bytes could change between checksum and read.
+        digest=$(printf '%s\n' "${lines[@]}" | sha256sum); digest=${digest%% *}
+        [ "$digest" = "$CRON_SHA256" ] || { echo '::error::Validated cron artifact changed after preflight.' >&2; exit 2; }
         ssh "$TARGET" "bash -s -- $(printf '%q ' "$DEPLOY_DIR" "${lines[@]}")" \
           <"$GITHUB_ACTION_PATH/scripts/install-cron.sh"
 
