@@ -183,18 +183,25 @@ try {
             else { $sign = ''; }
             if (is_array($token) && in_array($token[0], [T_LNUMBER, T_DNUMBER], true)) {
                 $offset++; $number = $sign.$token[1];
-                if (!preg_match('/^-?[0-9]+(?:\.[0-9]+)?(?:E[+-]?[0-9]+)?$/i', $number)) {
-                    throw new RuntimeException('numeric data');
+                // Accept only var_export's decimal spelling. PHP tokenizes octal,
+                // overflowing integers and noncanonical floats too; casting those
+                // would silently change cache values before regeneration.
+                if ($token[0] === T_LNUMBER) {
+                    $integer = filter_var($number, FILTER_VALIDATE_INT);
+                    if ($integer === false || (string) $integer !== $number) {
+                        throw new RuntimeException('integer data');
+                    }
+                    $one = $tokens[$offset + 1] ?? null;
+                    if ($integer === -PHP_INT_MAX && ($tokens[$offset] ?? null) === '-'
+                        && is_array($one) && $one[0] === T_LNUMBER && $one[1] === '1') {
+                        $offset += 2; return PHP_INT_MIN;
+                    }
+                    return $integer;
                 }
-                $integer = filter_var($number, FILTER_VALIDATE_INT);
-                $one = $tokens[$offset + 1] ?? null;
-                if ($integer === -PHP_INT_MAX && ($tokens[$offset] ?? null) === '-'
-                    && is_array($one) && $one[0] === T_LNUMBER && $one[1] === '1') {
-                    $offset += 2; return PHP_INT_MIN;
-                }
-                if ($integer !== false) { return $integer; }
                 $float = (float) $number;
-                if (!is_finite($float)) { throw new RuntimeException('nonfinite data'); }
+                if (!is_finite($float) || var_export($float, true) !== $number) {
+                    throw new RuntimeException('float data');
+                }
                 return $float;
             }
             if ($sign === '' && is_array($token) && $token[0] === T_STRING) {
@@ -420,8 +427,15 @@ try {
     $drivers = ['sync', 'null', 'database', 'redis', 'sqs', 'beanstalkd', 'deferred', 'background', 'failover'];
     if (!in_array($driver, $drivers, true)) { throw new RuntimeException('unsupported queue'); }
     $count = static function ($connection, $table) use ($app): int {
-        if ((!is_string($connection) && $connection !== null) || !is_string($table) || !preg_match('/\A[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)?\z/', $table)) {
+        if ((!is_string($connection) && $connection !== null) || !is_string($table) || $table === '' || strlen($table) > 1024 || str_contains($table, "\0")) {
             throw new RuntimeException('database configuration');
+        }
+        // The builder quotes each component, including spaces, hyphens and
+        // leading digits. Alias/wildcard/JSON forms are expressions rather than
+        // configured literal queue table identifiers and remain unsupported.
+        if (preg_match('/\\s+as\\s+/i', $table) || str_contains($table, '->')
+            || in_array('', explode('.', $table), true) || in_array('*', explode('.', $table), true)) {
+            throw new RuntimeException('database table expression');
         }
         return (int) $app->make('db')->connection($connection)->table($table)->count();
     };
@@ -463,7 +477,7 @@ try {
     ob_end_clean();
     if ($runtime) { echo 'runtime-audit identity=exact paths=canonical writable=yes database=persistent phase='.$argv[5]."\n"; }
     echo 'operational-audit pending_migrations=0 queue_driver='.$driver.
-        ' queue_applicability='.($driver === 'database' ? 'database' : (in_array($driver, ['sync', 'null'], true) ? 'no-persistent-queue' : 'external')).
+        ' queue_applicability='.($driver === 'database' ? 'database' : (in_array($driver, ['sync', 'null', 'deferred', 'background'], true) ? 'no-persistent-queue' : 'external')).
         ' pending_total='.($pendingJobs ?? 'not-counted').
         ' failed_applicability='.$failedState.' failed_total='.($failedJobs ?? 'not-counted')."\n";
 } catch (Throwable $error) {
