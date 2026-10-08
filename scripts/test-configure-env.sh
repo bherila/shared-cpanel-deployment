@@ -103,5 +103,94 @@ bash "$script" .deployments/app/releases/release-1 '' 'SET:APP_ENV=production' >
 check "a managed atomic candidate environment can be configured" \
     '[ "$status" -eq 0 ] && grep -Fqx APP_ENV=production "$managed/.env" && grep -Fqx "export APP_ENV=local" "$HOME/app/.env"'
 
+# 9. Backup identity is application-scoped, not release-scoped, and timestamps never collide.
+setup
+mkdir -p "$root/bin"
+cat >"$root/bin/date" <<'SH'
+#!/usr/bin/env bash
+printf '20261008T120000Z\n'
+SH
+chmod +x "$root/bin/date"
+for index in 1 2; do
+    managed="$HOME/.deployments/app/releases/release-$index"
+    mkdir -p "$managed"
+    printf 'APP_KEY=before-%s\n' "$index" >"$managed/.env"
+    PATH="$root/bin:$PATH" run ".deployments/app/releases/release-$index" '' "SET:APP_KEY=after-$index"
+done
+check "same-second releases preserve distinct backups in the application namespace" \
+    '[ "$(find "$HOME/.env-backups/app" -maxdepth 1 -type f | wc -l)" -eq 2 ] && grep -lqx APP_KEY=before-1 "$HOME/.env-backups/app"/.env-* >/dev/null && grep -lqx APP_KEY=before-2 "$HOME/.env-backups/app"/.env-* >/dev/null && [ ! -e "$HOME/.env-backups/.deployments" ]'
+check "backup directories and files are private" \
+    '[ "$(stat -c %a "$HOME/.env-backups")" = 700 ] && [ "$(stat -c %a "$HOME/.env-backups/app")" = 700 ] && [ -z "$(find "$HOME/.env-backups/app" -type f ! -perm 600 -print)" ]'
+
+# 10. Retention applies across releases and in-place changes, without touching other state.
+mkdir -p "$HOME/.env-backups/other-app" "$HOME/.env-backups/.deployments/app/releases/legacy"
+printf unrelated >"$HOME/.env-backups/app/.env-unrelated"
+printf legacy >"$HOME/.env-backups/.deployments/app/releases/legacy/.env-20200101T000000Z"
+printf other-app >"$HOME/.env-backups/other-app/.env-20200101T000000Z"
+printf outside >"$root/canary"
+ln -s "$root/canary" "$HOME/.env-backups/app/.env-20200101T000000Z"
+for index in $(seq 3 14); do
+    managed="$HOME/.deployments/app/releases/release-$index"
+    mkdir -p "$managed"
+    printf 'APP_KEY=before-%s\n' "$index" >"$managed/.env"
+    PATH="$root/bin:$PATH" run ".deployments/app/releases/release-$index" '' "SET:APP_KEY=after-$index" || fails=$((fails + 1))
+    # Force tied mtimes for the next run: the just-created backup must always survive pruning.
+    find "$HOME/.env-backups/app" -maxdepth 1 -type f -name '.env-20261008T120000Z.*' -exec touch -t 202610081200 {} +
+done
+check "fourteen atomic releases retain ten generated backups" \
+    '[ "$(find "$HOME/.env-backups/app" -maxdepth 1 -type f -name ".env-20261008T120000Z.*" | wc -l)" -eq 10 ] && grep -lqx APP_KEY=before-14 "$HOME/.env-backups/app"/.env-20261008T120000Z.* >/dev/null'
+run app '' SET:APP_KEY=in-place-change; status=$?
+check "in-place changes retain the same bounded namespace" \
+    '[ "$status" -eq 0 ] && [ "$(find "$HOME/.env-backups/app" -maxdepth 1 -type f -name ".env-20*T*Z.*" | wc -l)" -eq 10 ]'
+check "retention preserves unrelated files, symlinks, applications and legacy release directories" \
+    '[ "$(cat "$HOME/.env-backups/app/.env-unrelated")" = unrelated ] && [ -L "$HOME/.env-backups/app/.env-20200101T000000Z" ] && [ "$(cat "$root/canary")" = outside ] && [ "$(cat "$HOME/.env-backups/other-app/.env-20200101T000000Z")" = other-app ] && [ "$(cat "$HOME/.env-backups/.deployments/app/releases/legacy/.env-20200101T000000Z")" = legacy ]'
+
+# 11. Existing real timestamp-only backups count towards retention; aliases are refused.
+setup
+mkdir -p "$HOME/.env-backups/app"
+for index in $(seq -w 1 12); do printf legacy >"$HOME/.env-backups/app/.env-20200101T0000${index}Z"; done
+run app '' SET:APP_ENV=production; status=$?
+check "legacy in-place backups share the ten-file bound" \
+    '[ "$status" -eq 0 ] && [ "$(find "$HOME/.env-backups/app" -maxdepth 1 -type f | wc -l)" -eq 10 ]'
+for alias_part in root application; do
+    setup
+    before=$(cat "$HOME/app/.env")
+    mkdir -p "$root/outside"
+    printf canary >"$root/outside/canary"
+    chmod 755 "$root/outside"
+    if [ "$alias_part" = root ]; then
+        ln -s "$root/outside" "$HOME/.env-backups"
+    else
+        mkdir "$HOME/.env-backups"
+        ln -s "$root/outside" "$HOME/.env-backups/app"
+    fi
+    run app '' SET:APP_ENV=production; status=$?
+    check "a symlinked $alias_part backup namespace fails before changing secrets or permissions" \
+        '[ "$status" -eq 1 ] && [ "$(cat "$HOME/app/.env")" = "$before" ] && [ "$(cat "$root/outside/canary")" = canary ] && [ "$(stat -c %a "$root/outside")" = 755 ] && [ "$(find "$root/outside" -type f | wc -l)" -eq 1 ]'
+done
+run .deployments/./releases/release-1 '' SET:APP_ENV=production; status=$?
+check "an aliased managed application namespace is rejected" '[ "$status" -eq 2 ]'
+
+# 12. Failure to save the previous secrets cannot replace the live environment.
+setup
+before=$(cat "$HOME/app/.env")
+mkdir "$root/bin"
+cat >"$root/bin/install" <<'SH'
+#!/usr/bin/env bash
+case ${!#} in
+    "$HOME"/.env-backups/app/.env-*) exit 1 ;;
+esac
+exec /usr/bin/install "$@"
+SH
+chmod +x "$root/bin/install"
+PATH="$root/bin:$PATH" run app '' SET:APP_ENV=production; status=$?
+check "a failed backup copy leaves the live environment and no partial backup" \
+    '[ "$status" -eq 1 ] && [ "$(cat "$HOME/app/.env")" = "$before" ] && [ "$(backups)" -eq 0 ] && ! grep -Fq "s3cr#t" "$root/out"'
+
+setup
+managed_app=other-application run app '' SET:APP_ENV=production; status=$?
+check "an inherited shell variable cannot redirect an in-place backup namespace" \
+    '[ "$status" -eq 0 ] && [ -d "$HOME/.env-backups/app" ] && [ ! -e "$HOME/.env-backups/other-application" ]'
+
 echo "failures: $fails"
 exit "$fails"

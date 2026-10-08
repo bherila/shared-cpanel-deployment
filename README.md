@@ -108,6 +108,7 @@ implicit behavior change.
 | `post-finalize-script` | — | Runner-side read-only diagnostic after successful atomic finalization, with finalizer `DEPLOY_*` status. |
 | `operational-audit` | `false` | Atomic only: independent pending-migration assertion and read-only configured queue/failed-job aggregate reporting before selection and again before serving. |
 | `migration-order` | `after-upload` | In-place compatibility only. Atomic mode always migrates the candidate and rejects `before-upload`. |
+| `artisan-memory-limit` | — | Optional K/M/G CLI limit. Positive finite values must fit signed 64-bit bytes. `-1` remains supported when both optional audits are disabled; audits reject it before SSH. |
 | `artisan-commands` | — | Extra invocations after `config:cache`, e.g. `view:clear`. |
 | `preflight-script` | — | Atomic-only, read-only host prerequisite checks after built-in preflight and before either quiescence path, persistent conversion or DB risk. Gets `<candidate-path> <php> <stable-path>`; candidate environment/shared paths are not prepared yet. Empty preserves existing behavior. |
 | `quiesce-script` | — | After cron pause/old-code maintenance and before conversion or DB risk; wait for running workers here. Gets `<candidate-path> <php> <stable-path>`. |
@@ -130,6 +131,11 @@ implicit behavior change.
 | `health-expect` | `Application up` | Complete origin response bodies are limited to 256 KiB; PHP runtime records are limited to 512 bytes. Text the health body must contain; empty accepts any 2xx. A proxy's challenge or error page is a 2xx too, so keep it set. |
 | `verify-web-php` | `true` | The fetch retry budget is 75 seconds including SSH and host discovery. Probe creation and cleanup each have a separate 20-second SSH bound. Complete wrong-runtime responses fail definitively; HTML from another host address is skipped. |
 | `verification-script` | — | Runner-side live checks after `artisan up`, with deployment details in `DEPLOY_*`. |
+
+Configured hook files must exist and be readable in the checkout before SSH setup.
+When cron installation is enabled, the action renders and validates the complete managed
+cron lines on the runner before any remote transaction. Both deployment modes install
+those same digest-checked bytes; disabled cron ignores its unused rendering inputs.
 
 Outputs: `ssh-target`, `php-binary`, `release-id`, `live-release`, `live-commit` and `live-state`.
 
@@ -334,8 +340,13 @@ legacy line for the application is replaced rather than left running beside the 
 
 **`.env`** (`scripts/configure-env.sh`). Changes are applied to a copy and installed only when something
 changed, after the previous file is saved to `~/.env-backups/<deploy-dir>/` (outside the deploy
-directory, where `--delete` would remove it). Exact assertions fail before the candidate `.env` is
-installed. Values are never printed.
+directory, where `--delete` would remove it). Atomic candidates use that same application-scoped
+namespace, not a separate directory per release. Backup directories are mode 700 and files mode 600;
+unique names prevent changes in the same second overwriting one another. After a successful change,
+only the ten most recent helper-created backups for that application are retained, across releases.
+Unrelated files, symlinks, and old release-local backup directories are left untouched; review those
+legacy directories separately if migrating from an older action. Exact assertions fail before the
+candidate `.env` is installed. Values are never printed.
 
 **Persistent Passport and branding files.** Atomic mode refuses a Passport directory not covered by a
 declared persistent path. Passport setup keeps an existing complete signing pair,
@@ -389,7 +400,7 @@ an optional private branding bundle can keep that policy declarative:
 
 Set `artisan-memory-limit: 1G` when the application exceeds the host's CLI default. The limit applies
 to atomic maintenance/serving probes, lifecycle `down`/`up`, migration execution, the pending-migration
-assertion, config caching, and every command in `artisan-commands`.
+assertion, config caching, Passport key generation, and every command in `artisan-commands`.
 
 Leave `BRANDING_SOURCE` empty for the application's default theme. When set, point it at a directory
 such as `.config/identity/branding`; keep the canonical files there rather than inside the rsync target.
@@ -437,12 +448,14 @@ connection/table, and the independent failed-job driver/database/table. Only agg
 `COUNT(*)` queries and migration metadata reads are issued: no payloads, queue names, connection names,
 table names, credentials, or exception messages are emitted. Nonempty queues and failed-job history
 are observations, **not a reason to fail deployment**. Missing applicable tables/configuration and SQL
-errors fail closed. Applications must separately define any backlog/error policy.
+errors fail closed. Laravel's query builder quotes configured identifiers, including hyphens, spaces,
+leading digits and schema qualification; alias, wildcard and JSON-expression syntax is refused.
+No table identifier is interpolated into raw SQL. Applications must separately define any backlog/error policy.
 
-`sync`/`null` report `no-persistent-queue` with `not-counted`, never a misleading zero. External queue
+`sync`/`null`/`deferred`/`background` report `no-persistent-queue` with `not-counted`, never a misleading zero. External queue
 drivers report `external`/`not-counted`; this is **not a health assertion or a completed count audit**.
 Consumers using external queues/failed-job stores need an explicit application-specific read-only
-count/health verifier. Database failed jobs are counted even when the active queue is synchronous.
+count/health verifier. Database failed jobs are counted independently, including when the active queue is synchronous, deferred or background.
 Unrecognized custom drivers fail closed rather than guessing applicability.
 
 The host must provide an absolute coreutils `timeout` binary. PHP is bounded to 30 seconds with a
@@ -451,7 +464,9 @@ input/output with an 8192-block file-size limit, and a single validated output l
 Framework bootstrap is trusted application code; any captured stdout/stderr is withheld unless it
 matches the fixed aggregate protocol. No descendant can keep an SSH pipe open through audit I/O.
 Generated config is decoded using a bounded scalar-array grammar before bootstrap; executable cache
-content is rejected without execution. Laravel loads a private regenerated snapshot of those decoded
+content and noncanonical numeric literals (including octal or overflowing integer spellings) are
+rejected without execution. Canonical `var_export` integers and finite floats preserve both their
+value and PHP type, including `PHP_INT_MIN` and signed floating-point zero. Laravel loads a private regenerated snapshot of those decoded
 bytes, not the original cache file, preventing a validation/re-require race. No live cache is changed.
 Selection follows Laravel 12/13 precedence: an existing externally selected or default cache
 suppresses dotenv loading. When that initial path is absent, the framework's dotenv phase runs
@@ -493,6 +508,7 @@ bash scripts/test-atomic-release.sh
 bash scripts/test-atomic-begin-cleanup.sh
 python3 scripts/test-atomic-begin-waiter.py
 bash scripts/test-action-contract.sh
+python3 scripts/test-early-validation.py
 bash scripts/test-no-process-substitution.sh
 python3 scripts/test-live-verification.py
 bash scripts/test-recover-orphan.sh
