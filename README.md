@@ -108,6 +108,7 @@ implicit behavior change.
 | `post-finalize-script` | — | Runner-side read-only diagnostic after successful atomic finalization, with finalizer `DEPLOY_*` status. |
 | `operational-audit` | `false` | Atomic only: independent pending-migration assertion and read-only configured queue/failed-job aggregate reporting before selection and again before serving. |
 | `migration-order` | `after-upload` | In-place compatibility only. Atomic mode always migrates the candidate and rejects `before-upload`. |
+| `artisan-memory-limit` | — | Optional K/M/G CLI limit. Positive finite values must fit signed 64-bit bytes. `-1` remains supported when both optional audits are disabled; audits reject it before SSH. |
 | `artisan-commands` | — | Extra invocations after `config:cache`, e.g. `view:clear`. |
 | `preflight-script` | — | Atomic-only, read-only host prerequisite checks after built-in preflight and before either quiescence path, persistent conversion or DB risk. Gets `<candidate-path> <php> <stable-path>`; candidate environment/shared paths are not prepared yet. Empty preserves existing behavior. |
 | `quiesce-script` | — | After cron pause/old-code maintenance and before conversion or DB risk; wait for running workers here. Gets `<candidate-path> <php> <stable-path>`. |
@@ -130,6 +131,11 @@ implicit behavior change.
 | `health-expect` | `Application up` | Complete origin response bodies are limited to 256 KiB; PHP runtime records are limited to 512 bytes. Text the health body must contain; empty accepts any 2xx. A proxy's challenge or error page is a 2xx too, so keep it set. |
 | `verify-web-php` | `true` | The fetch retry budget is 75 seconds including SSH and host discovery. Probe creation and cleanup each have a separate 20-second SSH bound. Complete wrong-runtime responses fail definitively; HTML from another host address is skipped. |
 | `verification-script` | — | Runner-side live checks after `artisan up`, with deployment details in `DEPLOY_*`. |
+
+Configured hook files must exist and be readable in the checkout before SSH setup.
+When cron installation is enabled, the action renders and validates the complete managed
+cron lines on the runner before any remote transaction. Both deployment modes install
+those same digest-checked bytes; disabled cron ignores its unused rendering inputs.
 
 Outputs: `ssh-target`, `php-binary`, `release-id`, `live-release`, `live-commit` and `live-state`.
 
@@ -493,6 +499,7 @@ bash scripts/test-atomic-release.sh
 bash scripts/test-atomic-begin-cleanup.sh
 python3 scripts/test-atomic-begin-waiter.py
 bash scripts/test-action-contract.sh
+python3 scripts/test-early-validation.py
 bash scripts/test-no-process-substitution.sh
 python3 scripts/test-live-verification.py
 bash scripts/test-recover-orphan.sh

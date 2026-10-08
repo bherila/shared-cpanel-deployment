@@ -28,8 +28,11 @@
 # - Running it again with the same lines changes nothing.
 set -euo pipefail
 
+validate_only=false
+if [ "${1:-}" = --validate-only ]; then validate_only=true; shift; fi
+
 if [ "$#" -lt 2 ]; then
-    echo "usage: install-cron.sh <app-dir> <line>..." >&2
+    echo "usage: install-cron.sh [--validate-only] <app-dir> <line>..." >&2
     exit 2
 fi
 
@@ -59,6 +62,10 @@ for line in "$@"; do
     fi
     ids+=("$id")
 done
+
+# The runner invokes this exact validation before any SSH step. No host state
+# (including crontab locks or backups) is touched in validation mode.
+if [ "$validate_only" = true ]; then exit 0; fi
 
 if ! command -v flock >/dev/null 2>&1; then
     echo "::error::flock is not available on this host, so the shared crontab cannot be locked." >&2

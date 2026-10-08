@@ -349,6 +349,13 @@ runs:
         OPERATIONAL_AUDIT: ${{ inputs.operational-audit }}
         RUNTIME_AUDIT: ${{ inputs.runtime-audit }}
         POST_FINALIZE_SCRIPT: ${{ inputs.post-finalize-script }}
+        PREFLIGHT_SCRIPT: ${{ inputs.preflight-script }}
+        QUIESCE_SCRIPT: ${{ inputs.quiesce-script }}
+        PRE_MIGRATE_SCRIPT: ${{ inputs.pre-migrate-script }}
+        POST_DEPLOY_SCRIPT: ${{ inputs.post-deploy-script }}
+        PRE_ACTIVATE_SCRIPT: ${{ inputs.pre-activate-script }}
+        POST_ACTIVATE_SCRIPT: ${{ inputs.post-activate-script }}
+        VERIFICATION_SCRIPT: ${{ inputs.verification-script }}
         ARTISAN_MEMORY_LIMIT: ${{ inputs.artisan-memory-limit }}
         RETAIN_RELEASES: ${{ inputs.retain-releases }}
         LOCK_TIMEOUT: ${{ inputs.deploy-lock-timeout }}
@@ -386,9 +393,15 @@ runs:
         if [ -n "$POST_FINALIZE_SCRIPT" ] && [ "$DEPLOYMENT_MODE" != atomic ]; then
           echo '::error::post-finalize-script requires atomic mode.' >&2; exit 2
         fi
-        if [ -n "$POST_FINALIZE_SCRIPT" ] && [ ! -f "$POST_FINALIZE_SCRIPT" ]; then
-          echo '::error::post-finalize-script does not exist in the checkout.' >&2; exit 2
-        fi
+        # Resolve every configured hook before SSH setup, transaction creation,
+        # quiescence or migrations. Later guards still cover removed files.
+        for input in preflight-script quiesce-script pre-migrate-script post-deploy-script pre-activate-script post-activate-script verification-script post-finalize-script; do
+          variable=${input^^}; variable=${variable//-/_}
+          script=${!variable}
+          if [ -n "$script" ] && { [ ! -f "$script" ] || [ ! -r "$script" ]; }; then
+            echo "::error::$input does not exist in the checkout or is not readable." >&2; exit 2
+          fi
+        done
         case $DEPLOY_DIR_INPUT in
           '' | . | .. | .* | *[!A-Za-z0-9._-]*)
             echo "::error::deploy-dir must be a plain, non-hidden account-home name." >&2; exit 2 ;;
@@ -422,10 +435,9 @@ runs:
           echo "::error::migration-order 'before-upload' requires run-migrations: true." >&2
           exit 2
         fi
-        if [[ ! $ARTISAN_MEMORY_LIMIT =~ ^([1-9][0-9]*[KMGkmg]|-1)?$ ]]; then
-          echo "::error::artisan-memory-limit must be empty, -1, or a positive K/M/G value such as 1G." >&2
-          exit 2
-        fi
+        allow_unlimited=true
+        if [ "$OPERATIONAL_AUDIT" = true ] || [ "$RUNTIME_AUDIT" = true ]; then allow_unlimited=false; fi
+        bash "$GITHUB_ACTION_PATH/scripts/validate-artisan-memory-limit.sh" "$ARTISAN_MEMORY_LIMIT" "$allow_unlimited"
         if [[ ! $RETAIN_RELEASES =~ ^[0-9]+$ ]] || [ "$RETAIN_RELEASES" -lt 2 ]; then
           echo "::error::retain-releases must be an integer of at least 2." >&2; exit 2
         fi
@@ -468,6 +480,31 @@ runs:
           echo 'release-id=' >>"$GITHUB_OUTPUT"
           echo "app-dir=$DEPLOY_DIR_INPUT" >>"$GITHUB_OUTPUT"
         fi
+
+    - id: prepared-cron
+      name: Render and validate managed cron before deployment
+      if: inputs.install-cron == 'true'
+      shell: bash
+      env:
+        DEPLOY_DIR: ${{ inputs.deploy-dir }}
+        PHP_BINARY: ${{ steps.resolve.outputs.php }}
+        CRON_MEMORY: ${{ inputs.cron-memory-limit }}
+        SCHEDULER_LOG: ${{ inputs.scheduler-log }}
+        CRON_LINES: ${{ inputs.cron-lines }}
+        EXTRA_CRON_LINES: ${{ inputs.extra-cron-lines }}
+      run: |
+        set -euo pipefail
+        cron_file=$(mktemp "$RUNNER_TEMP/shared-deploy-cron.XXXXXXXX")
+        trap 'rm -f "$cron_file"' EXIT
+        bash "$GITHUB_ACTION_PATH/scripts/prepare-cron-lines.sh" \
+          "$DEPLOY_DIR" "$PHP_BINARY" "$CRON_MEMORY" "$SCHEDULER_LOG" "$CRON_LINES" "$EXTRA_CRON_LINES" \
+          >"$cron_file"
+        mapfile -t lines <"$cron_file"
+        bash "$GITHUB_ACTION_PATH/scripts/install-cron.sh" --validate-only "$DEPLOY_DIR" "${lines[@]}"
+        digest=$(sha256sum "$cron_file"); digest=${digest%% *}
+        echo "file=$cron_file" >>"$GITHUB_OUTPUT"
+        echo "sha256=$digest" >>"$GITHUB_OUTPUT"
+        trap - EXIT
 
     - id: ssh
       name: Configure SSH
@@ -971,19 +1008,14 @@ runs:
       env:
         TARGET: ${{ steps.ssh.outputs.target }}
         DEPLOY_DIR: ${{ inputs.deploy-dir }}
-        PHP_BINARY: ${{ steps.resolve.outputs.php }}
-        CRON_MEMORY: ${{ inputs.cron-memory-limit }}
-        SCHEDULER_LOG: ${{ inputs.scheduler-log }}
-        CRON_LINES: ${{ inputs.cron-lines }}
-        EXTRA_CRON_LINES: ${{ inputs.extra-cron-lines }}
+        CRON_FILE: ${{ steps.prepared-cron.outputs.file }}
+        CRON_SHA256: ${{ steps.prepared-cron.outputs.sha256 }}
       run: |
         set -euo pipefail
-        cron_file=$(mktemp)
-        trap 'rm -f "$cron_file"' EXIT
-        bash "$GITHUB_ACTION_PATH/scripts/prepare-cron-lines.sh" \
-          "$DEPLOY_DIR" "$PHP_BINARY" "$CRON_MEMORY" "$SCHEDULER_LOG" "$CRON_LINES" "$EXTRA_CRON_LINES" \
-          >"$cron_file"
-        mapfile -t lines <"$cron_file"
+        [ -f "$CRON_FILE" ] && [ ! -L "$CRON_FILE" ] || { echo '::error::Validated cron artifact is unavailable.' >&2; exit 2; }
+        digest=$(sha256sum "$CRON_FILE"); digest=${digest%% *}
+        [ "$digest" = "$CRON_SHA256" ] || { echo '::error::Validated cron artifact changed after preflight.' >&2; exit 2; }
+        mapfile -t lines <"$CRON_FILE"
         ssh "$TARGET" "bash -s -- $(printf '%q ' "$DEPLOY_DIR" "${lines[@]}")" \
           <"$GITHUB_ACTION_PATH/scripts/install-cron.sh"
 
@@ -1138,19 +1170,14 @@ runs:
       env:
         TARGET: ${{ steps.ssh.outputs.target }}
         DEPLOY_DIR: ${{ inputs.deploy-dir }}
-        PHP_BINARY: ${{ steps.resolve.outputs.php }}
-        CRON_MEMORY: ${{ inputs.cron-memory-limit }}
-        SCHEDULER_LOG: ${{ inputs.scheduler-log }}
-        CRON_LINES: ${{ inputs.cron-lines }}
-        EXTRA_CRON_LINES: ${{ inputs.extra-cron-lines }}
+        CRON_FILE: ${{ steps.prepared-cron.outputs.file }}
+        CRON_SHA256: ${{ steps.prepared-cron.outputs.sha256 }}
       run: |
         set -euo pipefail
-        cron_file=$(mktemp)
-        trap 'rm -f "$cron_file"' EXIT
-        bash "$GITHUB_ACTION_PATH/scripts/prepare-cron-lines.sh" \
-          "$DEPLOY_DIR" "$PHP_BINARY" "$CRON_MEMORY" "$SCHEDULER_LOG" "$CRON_LINES" "$EXTRA_CRON_LINES" \
-          >"$cron_file"
-        mapfile -t lines <"$cron_file"
+        [ -f "$CRON_FILE" ] && [ ! -L "$CRON_FILE" ] || { echo '::error::Validated cron artifact is unavailable.' >&2; exit 2; }
+        digest=$(sha256sum "$CRON_FILE"); digest=${digest%% *}
+        [ "$digest" = "$CRON_SHA256" ] || { echo '::error::Validated cron artifact changed after preflight.' >&2; exit 2; }
+        mapfile -t lines <"$CRON_FILE"
         ssh "$TARGET" "bash -s -- $(printf '%q ' "$DEPLOY_DIR" "${lines[@]}")" \
           <"$GITHUB_ACTION_PATH/scripts/install-cron.sh"
 
@@ -1416,3 +1443,10 @@ runs:
         DEPLOYMENT_MODE: ${{ inputs.deployment-mode }}
       run: |
         bash "$GITHUB_ACTION_PATH/scripts/run-post-finalize-hook.sh"
+
+    - name: Remove the prepared cron artifact
+      if: always() && steps.prepared-cron.outputs.file != ''
+      shell: bash
+      env:
+        CRON_FILE: ${{ steps.prepared-cron.outputs.file }}
+      run: rm -f -- "$CRON_FILE"

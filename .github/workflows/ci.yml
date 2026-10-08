@@ -33,6 +33,9 @@ jobs:
       - name: Shellcheck
         run: shellcheck scripts/*.sh
 
+      - name: Early input and cron validation composite fixtures
+        run: python3 scripts/test-early-validation.py
+
       - name: install-cron.sh harness
         run: bash scripts/test-install-cron.sh
 
