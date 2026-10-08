@@ -500,7 +500,7 @@ runs:
           "$DEPLOY_DIR" "$PHP_BINARY" "$CRON_MEMORY" "$SCHEDULER_LOG" "$CRON_LINES" "$EXTRA_CRON_LINES" \
           >"$cron_file"
         mapfile -t lines <"$cron_file"
-        bash "$GITHUB_ACTION_PATH/scripts/install-cron.sh" --validate-only "$DEPLOY_DIR" "${lines[@]}"
+        bash "$GITHUB_ACTION_PATH/scripts/install-cron.sh" --validate-only -- "$DEPLOY_DIR" "${lines[@]}"
         digest=$(printf '%s\n' "${lines[@]}" | sha256sum); digest=${digest%% *}
         echo "file=$cron_file" >>"$GITHUB_OUTPUT"
         echo "sha256=$digest" >>"$GITHUB_OUTPUT"
