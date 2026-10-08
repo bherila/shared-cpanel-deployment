@@ -29,10 +29,10 @@
 set -euo pipefail
 
 validate_only=false
-if [ "${1:-}" = --validate-only ]; then validate_only=true; shift; fi
+if [ "${1:-}" = --validate-only ] && [ "${2:-}" = -- ]; then validate_only=true; shift 2; fi
 
 if [ "$#" -lt 2 ]; then
-    echo "usage: install-cron.sh [--validate-only] <app-dir> <line>..." >&2
+    echo "usage: install-cron.sh [--validate-only --] <app-dir> <line>..." >&2
     exit 2
 fi
 

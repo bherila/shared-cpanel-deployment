@@ -175,6 +175,7 @@ reject('missing cron job id', {'cron-lines': '* * * * * cd "$HOME/app" && true'}
 # These tests deliberately use app to make directory validation meaningful.
 for mode in ('atomic', 'in-place'):
     accepted(mode + ' default rendering', {'deploy-dir': 'app', 'deployment-mode': mode})
+accepted('option-shaped existing application name remains valid', {'deploy-dir': '--validate-only'})
 accepted('all configured readable hooks', {'deploy-dir': 'app', **{hook: str(REPO / 'scripts/test-action-contract.sh') for hook in HOOKS}})
 accepted('audits disabled preserve unlimited Artisan setting', {'deploy-dir': 'app', 'artisan-memory-limit': '-1'})
 accepted('disabled cron ignores unused malformed configuration', {'deploy-dir': 'app', 'install-cron': 'false',
