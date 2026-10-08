@@ -448,12 +448,14 @@ connection/table, and the independent failed-job driver/database/table. Only agg
 `COUNT(*)` queries and migration metadata reads are issued: no payloads, queue names, connection names,
 table names, credentials, or exception messages are emitted. Nonempty queues and failed-job history
 are observations, **not a reason to fail deployment**. Missing applicable tables/configuration and SQL
-errors fail closed. Applications must separately define any backlog/error policy.
+errors fail closed. Laravel's query builder quotes configured identifiers, including hyphens, spaces,
+leading digits and schema qualification; alias, wildcard and JSON-expression syntax is refused.
+No table identifier is interpolated into raw SQL. Applications must separately define any backlog/error policy.
 
-`sync`/`null` report `no-persistent-queue` with `not-counted`, never a misleading zero. External queue
+`sync`/`null`/`deferred`/`background` report `no-persistent-queue` with `not-counted`, never a misleading zero. External queue
 drivers report `external`/`not-counted`; this is **not a health assertion or a completed count audit**.
 Consumers using external queues/failed-job stores need an explicit application-specific read-only
-count/health verifier. Database failed jobs are counted even when the active queue is synchronous.
+count/health verifier. Database failed jobs are counted independently, including when the active queue is synchronous, deferred or background.
 Unrecognized custom drivers fail closed rather than guessing applicability.
 
 The host must provide an absolute coreutils `timeout` binary. PHP is bounded to 30 seconds with a
@@ -462,7 +464,9 @@ input/output with an 8192-block file-size limit, and a single validated output l
 Framework bootstrap is trusted application code; any captured stdout/stderr is withheld unless it
 matches the fixed aggregate protocol. No descendant can keep an SSH pipe open through audit I/O.
 Generated config is decoded using a bounded scalar-array grammar before bootstrap; executable cache
-content is rejected without execution. Laravel loads a private regenerated snapshot of those decoded
+content and noncanonical numeric literals (including octal or overflowing integer spellings) are
+rejected without execution. Canonical `var_export` integers and finite floats preserve both their
+value and PHP type, including `PHP_INT_MIN` and signed floating-point zero. Laravel loads a private regenerated snapshot of those decoded
 bytes, not the original cache file, preventing a validation/re-require race. No live cache is changed.
 Selection follows Laravel 12/13 precedence: an existing externally selected or default cache
 suppresses dotenv loading. When that initial path is absent, the framework's dotenv phase runs

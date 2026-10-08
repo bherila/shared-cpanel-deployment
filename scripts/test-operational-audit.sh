@@ -14,8 +14,8 @@ namespace {
 function config($key) {
     return match ($key) {
         'queue.default' => 'selected',
-        'queue.connections.selected' => ['driver'=>getenv('DRIVER') ?: 'database','connection'=>'queue-db','table'=>'custom_jobs'],
-        'queue.failed' => ['driver'=>getenv('FAILED_DRIVER') ?: 'database-uuids','database'=>'failed-db','table'=>'custom_failed'],
+        'queue.connections.selected' => ['driver'=>getenv('DRIVER') ?: 'database','connection'=>'queue-db','table'=>getenv('QUEUE_TABLE') ?: 'custom_jobs'],
+        'queue.failed' => ['driver'=>getenv('FAILED_DRIVER') ?: 'database-uuids','database'=>'failed-db','table'=>getenv('FAILED_TABLE') ?: 'custom_failed'],
     };
 }
 class Fixture {
@@ -23,6 +23,12 @@ class Fixture {
     public function getCachedConfigPath() { return getcwd().'/bootstrap/cache/config.php'; }
     public function make($key) { return $this; }
     public function bootstrap() {
+        if (getenv('NUMBER_ORACLE')) {
+            $snapshot = require getenv('APP_CONFIG_CACHE');
+            if (serialize($snapshot['numbers']) !== file_get_contents(getenv('NUMBER_ORACLE'))) {
+                throw new \RuntimeException('numeric value/type changed');
+            }
+        }
         if (getenv('BYTE_ORACLE')) {
             $snapshot = require getenv('APP_CONFIG_CACHE');
             foreach ($snapshot['oracle'] as $hex => $value) {
@@ -51,7 +57,7 @@ class Fixture {
         $this->connection = $connection; return $this;
     }
     public function table($table) {
-        if (($this->connection === 'queue-db' && $table !== 'custom_jobs') || ($this->connection === 'failed-db' && $table !== 'custom_failed') || getenv('MISSING_TABLE')) { throw new \RuntimeException('SECRET database failure'); }
+        if (($this->connection === 'queue-db' && $table !== (getenv('QUEUE_TABLE') ?: 'custom_jobs')) || ($this->connection === 'failed-db' && $table !== (getenv('FAILED_TABLE') ?: 'custom_failed')) || getenv('MISSING_TABLE')) { throw new \RuntimeException('SECRET database failure'); }
         return $this;
     }
     public function count() { return $this->connection === 'queue-db' ? 7 : 3; }
@@ -64,10 +70,23 @@ audit() { bash "$here/operational-audit.sh" app "$php" 256M; }
 audit >"$scratch/output"
 bash "$here/operational-audit.sh" app "$php" -1 >"$scratch/unlimited-lifecycle"
 grep -Fq 'pending_total=7 failed_applicability=database failed_total=3' "$scratch/output"
-for driver in sync null redis; do
+for driver in sync null deferred background redis sqs beanstalkd failover; do
     DRIVER=$driver audit >"$scratch/output"
-    grep -Fq 'pending_total=not-counted' "$scratch/output"
+    applicability=external
+    case "$driver" in sync|null|deferred|background) applicability=no-persistent-queue ;; esac
+    grep -Fq "queue_applicability=$applicability pending_total=not-counted failed_applicability=database failed_total=3" "$scratch/output"
 done
+for table in '1jobs' 'queue-jobs' 'jobs history' 'main.queue-jobs' 'a"b' 'a`b' 'jobs; DROP TABLE history'; do
+    QUEUE_TABLE="$table" FAILED_TABLE="$table" audit >"$scratch/output"
+    grep -Fq 'pending_total=7 failed_applicability=database failed_total=3' "$scratch/output"
+    if grep -Fq "$table" "$scratch/output"; then exit 1; fi
+done
+for table in 'jobs as other' 'jobs AS other' 'jobs->data' '*.jobs' 'jobs.*' '.jobs' 'jobs.'; do
+    if QUEUE_TABLE="$table" audit >"$scratch/output" 2>&1; then exit 1; fi
+done
+DRIVER=deferred FAILED_DRIVER=null audit >"$scratch/output"
+grep -Fq 'queue_applicability=no-persistent-queue pending_total=not-counted failed_applicability=disabled failed_total=not-counted' "$scratch/output"
+if DRIVER=background MISSING_TABLE=1 audit >"$scratch/output" 2>&1; then exit 1; fi
 NOISE=1 audit >"$scratch/output"
 if grep -Fq SECRET "$scratch/output"; then exit 1; fi
 for failure in ERROR PENDING MISSING_TABLE; do
@@ -94,6 +113,17 @@ echo "<?php return ".var_export(["oracle"=>$values],true).";";
 ' >"$HOME/app/bootstrap/cache/config.php"
 BYTE_ORACLE=1 audit >"$scratch/output"
 rm "$HOME/app/bootstrap/cache/config.php"
+"$php" -r '
+$numbers = [PHP_INT_MIN, PHP_INT_MAX, -PHP_INT_MAX, 0, -1, 1, -0.0, 0.0, 1.0, -1.0,
+    PHP_FLOAT_MIN, PHP_FLOAT_MAX, -PHP_FLOAT_MAX, 5e-324, 1e-15, 1e18, 1e20];
+file_put_contents($argv[1], serialize($numbers));
+echo "<?php return ".var_export(["numbers"=>$numbers], true).";";
+' "$scratch/numbers" >"$HOME/app/bootstrap/cache/config.php"
+NUMBER_ORACLE="$scratch/numbers" audit >"$scratch/output"
+for number in 010 08 00 -010 -00 0x10 0b10 0o10 1_000 +1 -0 01.0 1.00 1e2 1.0e+20 1.0E20 9223372036854775808 -9223372036854775808 1e309; do
+    printf '<?php return array ("number" => %s);\n' "$number" >"$HOME/app/bootstrap/cache/config.php"
+    if audit >"$scratch/output" 2>&1; then echo "accepted noncanonical numeric literal $number" >&2; exit 1; fi
+done
 cat >"$HOME/app/bootstrap/cache/config.php" <<'PHP'
 <?php return array ('cache' => array ('test' => 'a' . "\0" . 'b', 'min' => -9223372036854775807-1, 'empty' => NULL, 'float' => 1.5, 'bool' => true),);
 PHP
