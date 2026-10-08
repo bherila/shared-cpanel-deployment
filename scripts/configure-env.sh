@@ -13,9 +13,10 @@
 #              ASSERT:KEY=value fail unless that exact, unquoted assignment is present
 #
 # Every SET is applied to a copy; the live .env is replaced only when something changed, after the
-# previous one is saved to ~/.env-backups/<app-dir>/ (outside the deploy directory, where rsync
+# previous one is saved to ~/.env-backups/<application>/ (outside the deploy directory, where rsync
 # --delete would remove it). Values are never printed. REQUIRE checks run after the SETs, so a deploy
-# stops here, before any migration, when a key the application needs is missing.
+# stops here, before any migration, when a key the application needs is missing. Atomic releases of
+# one application share this backup namespace; only its ten newest managed backups are retained.
 set -euo pipefail
 
 if [ "$#" -lt 2 ]; then
@@ -24,6 +25,7 @@ if [ "$#" -lt 2 ]; then
 fi
 
 app_dir=$1
+backup_app=$app_dir
 source_file=$2
 shift 2
 
@@ -34,7 +36,9 @@ case $app_dir in
         if [ "$prefix" != .deployments ] || [ "$releases_component" != releases ] || [ -n "$extra" ]; then
             echo "::error::The managed release path is malformed." >&2; exit 2
         fi
-        case "$managed_app:$managed_release" in *[!A-Za-z0-9._:-]* | :* | *:) echo "::error::The managed release path is malformed." >&2; exit 2 ;; esac ;;
+        case "$managed_app:$managed_release" in *[!A-Za-z0-9._:-]* | :* | *:) echo "::error::The managed release path is malformed." >&2; exit 2 ;; esac
+        case $managed_app in .*) echo "::error::The managed application name must not be hidden." >&2; exit 2 ;; esac
+        backup_app=$managed_app ;;
     .* | */*) echo "::error::The application path must be a plain account-home name or a managed release." >&2; exit 2 ;;
 esac
 
@@ -158,17 +162,35 @@ if [ "${#missing[@]}" -gt 0 ]; then
 fi
 
 if [ ! -f "$app/.env" ] || ! cmp -s "$app/.env" "$work/next"; then
-    backups="$HOME/.env-backups/$app_dir"
+    backups="$HOME/.env-backups/$backup_app"
     backup=''
     if [ -f "$app/.env" ]; then
-        install -d -m 700 "$HOME/.env-backups" "$backups"
-        backup="$backups/.env-$(date -u +%Y%m%dT%H%M%SZ)"
-        install -m 600 "$app/.env" "$backup"
+        for directory in "$HOME/.env-backups" "$backups"; do
+            if [ -L "$directory" ] || { [ -e "$directory" ] && [ ! -d "$directory" ]; }; then
+                echo "::error::The environment backup namespace must contain only real directories." >&2
+                exit 1
+            fi
+            install -d -m 700 "$directory"
+        done
+        # A random suffix prevents multiple changes in the same second overwriting a backup.
+        backup=$(mktemp "$backups/.env-$(date -u +%Y%m%dT%H%M%SZ).XXXXXX")
+        if ! install -m 600 "$app/.env" "$backup"; then
+            rm -f -- "$backup"
+            echo "::error::The previous environment could not be backed up." >&2
+            exit 1
+        fi
     fi
     install -m 600 "$work/next" "$app/.env"
-    # Keep the ten most recent.
+    # Keep this backup and the nine newest others, including timestamp-only legacy names.
+    # Never prune directories, symlinks or files outside the helper's exact naming grammar.
     if [ -n "$backup" ]; then
-        find "$backups" -maxdepth 1 -type f -name '.env-*' | sort -r | tail -n +11 | while IFS= read -r old; do rm -f "$old"; done
+        find "$backups" -maxdepth 1 -type f -printf '%T@ %f\n' |
+            while read -r modified name; do
+                if [[ $name =~ ^\.env-[0-9]{8}T[0-9]{6}Z(\.[A-Za-z0-9]{6})?$ ]] && [ "$backups/$name" != "$backup" ]; then
+                    printf '%s %s\n' "$modified" "$name"
+                fi
+            done | LC_ALL=C sort -nr | tail -n +10 |
+            while read -r modified name; do rm -f -- "$backups/$name"; done
         echo "Updated .env (previous saved to $backup)."
     else
         echo "Installed .env."

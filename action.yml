@@ -545,9 +545,10 @@ runs:
         DEPLOY_DIR: ${{ inputs.deploy-dir }}
         PHP_BINARY: ${{ steps.resolve.outputs.php }}
         KEY_DIRECTORY: ${{ inputs.passport-key-directory }}
+        ARTISAN_MEMORY_LIMIT: ${{ inputs.artisan-memory-limit }}
       run: |
         set -euo pipefail
-        ssh "$TARGET" "bash -s -- $(printf '%q ' "$DEPLOY_DIR" "$PHP_BINARY" "$KEY_DIRECTORY")" \
+        ssh "$TARGET" "bash -s -- $(printf '%q ' "$DEPLOY_DIR" "$PHP_BINARY" "$KEY_DIRECTORY" '' "$ARTISAN_MEMORY_LIMIT")" \
           <"$GITHUB_ACTION_PATH/scripts/ensure-passport-keys.sh"
 
     - name: Run the pre-migrate script against the previous release
@@ -829,9 +830,10 @@ runs:
         SHARED_ROOT: ${{ inputs.deployment-mode == 'atomic' && format('.deployments/{0}/shared', inputs.deploy-dir) || '' }}
         PHP_BINARY: ${{ steps.resolve.outputs.php }}
         KEY_DIRECTORY: ${{ inputs.passport-key-directory }}
+        ARTISAN_MEMORY_LIMIT: ${{ inputs.artisan-memory-limit }}
       run: |
         set -euo pipefail
-        ssh "$TARGET" "bash -s -- $(printf '%q ' "$DEPLOY_DIR" "$PHP_BINARY" "$KEY_DIRECTORY" "$SHARED_ROOT")" \
+        ssh "$TARGET" "bash -s -- $(printf '%q ' "$DEPLOY_DIR" "$PHP_BINARY" "$KEY_DIRECTORY" "$SHARED_ROOT" "$ARTISAN_MEMORY_LIMIT")" \
           <"$GITHUB_ACTION_PATH/scripts/ensure-passport-keys.sh"
 
     - name: Install private branding
