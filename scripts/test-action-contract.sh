@@ -126,7 +126,7 @@ check "read-only finalized audit and hook run after unlocking" test "$finalize" 
 check "finalizer diagnostic receives final status" grep -Fq 'DEPLOY_LIVE_COMMIT: ${{ steps.atomic-finalize.outputs.live_commit }}' "$action"
 check "finalized audits require successful finalization" grep -Fq "steps.atomic-finalize.outcome == 'success'" "$action"
 
-post_finalize_validation=$(grep -nF 'post-finalize-script does not exist in the checkout.' "$action" | head -1 | cut -d: -f1)
+post_finalize_validation=$(grep -nF 'verification-script post-finalize-script; do' "$action" | head -1 | cut -d: -f1)
 check "missing post-finalizer scripts fail before acquiring the production lock" test "$post_finalize_validation" -lt "$begin"
 check "post-finalizer diagnostics use the bounded retry runner" grep -Fq 'bash "$GITHUB_ACTION_PATH/scripts/run-post-finalize-hook.sh"' "$action"
 echo "failures: $fails"

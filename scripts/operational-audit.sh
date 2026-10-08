@@ -16,7 +16,23 @@ case "$app_dir" in
         [ "$prefix" = .deployments ] && [ "$component" = releases ] && [ -n "$app" ] && [ -n "$candidate_release" ] && [ -z "$extra" ] || exit 2 ;;
     .*|*/*) exit 2 ;;
 esac
-[[ "$php" = /* && -x "$php" && "$memory" =~ ^[1-9][0-9]*[KMGkmg]$ ]] || exit 2
+[[ "$php" = /* && -x "$php" ]] || exit 2
+# A regex alone accepts values PHP may overflow into zero or unlimited memory.
+# Keep this remote guard independent of the runner: operational-audit.sh is sent over stdin.
+# Signed 64-bit byte bounds, checked as decimal strings before any PHP process.
+[[ $memory =~ ^([1-9][0-9]*)([KMGkmg])$ ]] || exit 2
+memory_digits=${BASH_REMATCH[1]}
+case ${BASH_REMATCH[2]} in
+    [Kk]) memory_maximum=9007199254740991 ;;
+    [Mm]) memory_maximum=8796093022207 ;;
+    [Gg]) memory_maximum=8589934591 ;;
+esac
+LC_ALL=C
+# shellcheck disable=SC2071
+if [[ ${#memory_digits} -gt ${#memory_maximum} || ( ${#memory_digits} -eq ${#memory_maximum} && $memory_digits > $memory_maximum ) ]]; then
+    echo '::error::Audit memory limit exceeds the signed 64-bit byte ceiling.' >&2
+    exit 2
+fi
 timeout_binary=$(command -v timeout)
 [[ "$timeout_binary" = /* && -x "$timeout_binary" ]] || exit 2
 # The durable generation changes under the lock at every begin, including
