@@ -2,8 +2,8 @@
 # Keep or create one complete Laravel Passport signing-key pair; never rotate a partial pair.
 set -euo pipefail
 
-if [ "$#" -lt 3 ] || [ "$#" -gt 4 ]; then
-    echo "usage: ensure-passport-keys.sh <app-dir> <php> <key-directory> [managed-shared-root]" >&2
+if [ "$#" -lt 3 ] || [ "$#" -gt 5 ]; then
+    echo "usage: ensure-passport-keys.sh <app-dir> <php> <key-directory> [managed-shared-root] [memory-limit]" >&2
     exit 2
 fi
 
@@ -11,6 +11,11 @@ app_dir=$1
 php=$2
 key_directory=$3
 managed_shared_root=${4:-}
+memory_limit=${5:-}
+if [[ ! $memory_limit =~ ^([1-9][0-9]*[KMGkmg]|-1)?$ ]]; then
+    echo "::error::PHP memory limit must be empty, -1, or a positive K/M/G value." >&2
+    exit 2
+fi
 
 case $app_dir in
     '' | . | .. | /* | *..* | *[!A-Za-z0-9._/-]*) echo "::error::The application path is unsafe." >&2; exit 2 ;;
@@ -76,7 +81,11 @@ if [ "$private_ok" = true ] && [ "$public_ok" = true ]; then
     chmod 600 "$private" "$public"
     echo "Passport signing key pair is complete."
 elif [ ! -e "$private" ] && [ ! -e "$public" ]; then
-    (cd "$app" && "$php" artisan passport:keys --force)
+    if [ -n "$memory_limit" ]; then
+        (cd "$app" && "$php" -d "memory_limit=$memory_limit" artisan passport:keys --force)
+    else
+        (cd "$app" && "$php" artisan passport:keys --force)
+    fi
     if [ ! -f "$private" ] || [ -L "$private" ] || [ ! -s "$private" ] \
         || [ ! -f "$public" ] || [ -L "$public" ] || [ ! -s "$public" ]; then
         echo "::error::passport:keys did not create the expected complete key pair." >&2

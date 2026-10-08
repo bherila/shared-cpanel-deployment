@@ -340,8 +340,13 @@ legacy line for the application is replaced rather than left running beside the 
 
 **`.env`** (`scripts/configure-env.sh`). Changes are applied to a copy and installed only when something
 changed, after the previous file is saved to `~/.env-backups/<deploy-dir>/` (outside the deploy
-directory, where `--delete` would remove it). Exact assertions fail before the candidate `.env` is
-installed. Values are never printed.
+directory, where `--delete` would remove it). Atomic candidates use that same application-scoped
+namespace, not a separate directory per release. Backup directories are mode 700 and files mode 600;
+unique names prevent changes in the same second overwriting one another. After a successful change,
+only the ten most recent helper-created backups for that application are retained, across releases.
+Unrelated files, symlinks, and old release-local backup directories are left untouched; review those
+legacy directories separately if migrating from an older action. Exact assertions fail before the
+candidate `.env` is installed. Values are never printed.
 
 **Persistent Passport and branding files.** Atomic mode refuses a Passport directory not covered by a
 declared persistent path. Passport setup keeps an existing complete signing pair,
@@ -395,7 +400,7 @@ an optional private branding bundle can keep that policy declarative:
 
 Set `artisan-memory-limit: 1G` when the application exceeds the host's CLI default. The limit applies
 to atomic maintenance/serving probes, lifecycle `down`/`up`, migration execution, the pending-migration
-assertion, config caching, and every command in `artisan-commands`.
+assertion, config caching, Passport key generation, and every command in `artisan-commands`.
 
 Leave `BRANDING_SOURCE` empty for the application's default theme. When set, point it at a directory
 such as `.config/identity/branding`; keep the canonical files there rather than inside the rsync target.
