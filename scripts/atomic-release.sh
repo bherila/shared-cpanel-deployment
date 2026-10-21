@@ -321,6 +321,36 @@ require_serving() {
     return 1
 }
 
+quiesce_rollback_candidate() {
+    local php=$1 root=$2 memory=$3 previous=$4 prior_root expected_release expected_commit
+    if artisan_mode "$php" "$root" down "$memory" && require_maintenance "$php" "$root" "$memory"; then
+        return 0
+    fi
+    # A failed candidate's autoloader or cache may be precisely what needs restoring.
+    # Fall back only to the exact retained prior code and its shared file maintenance.
+    validate_release_target "$previous" || return 1
+    prior_root="$HOME/$previous"
+    read_value previous_release || return 1; expected_release=$REPLY
+    read_value previous_commit || return 1; expected_commit=$REPLY
+    [ "$(metadata_value "$prior_root" release || true)" = "$expected_release" ] || return 1
+    [ "$(metadata_value "$prior_root" commit || true)" = "$expected_commit" ] || return 1
+    [ "$(readlink -f "$root/storage")" = "$shared/storage" ] || return 1
+    [ "$(readlink -f "$prior_root/storage")" = "$shared/storage" ] || return 1
+    # shellcheck disable=SC2016
+    (cd "$prior_root" && run_php "$php" "$memory" -r '
+        require "vendor/autoload.php";
+        $app = require "bootstrap/app.php";
+        $app->make(Illuminate\Contracts\Console\Kernel::class)->bootstrap();
+        exit($app["config"]->get("app.maintenance.driver", "file") === "file" ? 0 : 2);
+    ') || return 1
+    artisan_mode "$php" "$prior_root" down "$memory" || return 1
+    require_maintenance "$php" "$prior_root" "$memory" || return 1
+    # Standard Laravel entrypoints read this before loading the candidate autoloader.
+    # Keep the shim until the restored prior release's `up` removes it.
+    printf '%s\n' '<?php http_response_code(503); header("Retry-After: 30"); echo "Restoring the previous release."; exit;' \
+        > "$shared/storage/framework/maintenance.php"
+}
+
 switch_stable() {
     local target=$1 temporary="$HOME/.${app_name}.next-$release_id"
     validate_release_target "$target" || {
@@ -1128,9 +1158,9 @@ prepare() {
             [ "$status" -eq 0 ] || [ "$status" -eq 3 ] || exit "$status"
         done <"$transaction/persistent-paths"
         read_value initial_live_commit; initial_commit=$REPLY
+        write_value previous_release "$legacy_id"
+        write_value previous_commit "$initial_commit"
         if [ "$layout" = stable-directory ]; then
-            write_value previous_release "$legacy_id"
-            write_value previous_commit "$initial_commit"
             write_release_metadata "$stable" "$legacy_id" "$initial_commit"
             converted=true
             write_value previous_target stable
@@ -1172,6 +1202,14 @@ prepare() {
         echo "Migrated the managed symlink deployment to real directory ~/$app_name in maintenance."
     elif [ "$previous" != none ]; then
         legacy_root=$(root_for_target "$previous") || { echo "::error::Selected release root is invalid." >&2; exit 1; }
+        if [ "$layout" = release-symlink ]; then
+            previous_release=$(metadata_value "$legacy_root" release || true)
+            previous_commit=$(metadata_value "$legacy_root" commit || true)
+            [ "$previous_release" = "${previous##*/}" ] || { echo "::error::Prior symlink release identity is invalid." >&2; exit 1; }
+            [[ $previous_commit =~ ^[0-9A-Fa-f]{7,64}$ ]] || { echo "::error::Prior symlink commit identity is invalid." >&2; exit 1; }
+            write_value previous_release "$previous_release"
+            write_value previous_commit "$previous_commit"
+        fi
         while IFS= read -r path || [ -n "$path" ]; do
             [ -n "$path" ] || continue
             ensure_safe_ancestors "$legacy_root" "$path" false
@@ -1588,8 +1626,7 @@ finalize() {
             if [ "$layout" = stable-directory ]; then
                 current=$(selected_target)
                 if [ "$current" = stable ] && [ "$(metadata_value "$stable" release || true)" = "$release_id" ]; then
-                    artisan_mode "$php" "$stable" down "$memory" || recovery_status=1
-                    if [ "$recovery_status" -eq 0 ]; then require_maintenance "$php" "$stable" "$memory" || recovery_status=1; fi
+                    quiesce_rollback_candidate "$php" "$stable" "$memory" "$previous" || recovery_status=1
                 fi
                 if [ "$recovery_status" -eq 0 ]; then restore_real_previous || recovery_status=1; fi
                 current=$(selected_target)
@@ -1605,8 +1642,7 @@ finalize() {
             else
             current=$(selected_target)
             if [ "$current" = ".deployments/$app_name/releases/$release_id" ]; then
-                artisan_mode "$php" "$candidate" down "$memory" || recovery_status=1
-                if [ "$recovery_status" -eq 0 ]; then require_maintenance "$php" "$candidate" "$memory" || recovery_status=1; fi
+                quiesce_rollback_candidate "$php" "$candidate" "$memory" "$previous" || recovery_status=1
                 if [ "$recovery_status" -eq 0 ]; then switch_stable "$previous" || recovery_status=1; fi
             fi
             current=$(selected_target)
