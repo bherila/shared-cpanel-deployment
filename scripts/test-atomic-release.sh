@@ -41,6 +41,7 @@ SH
 #!/usr/bin/env bash
 printf '%s|%s\n' "$PWD" "$*" >>"$PHP_LOG"
 while [ "${1:-}" = -d ]; do shift 2; done
+[ ! -f .candidate-broken ] || exit 48
 [ "${1:-}" = artisan ] && shift
 case ${1:-} in
     -r)
@@ -52,9 +53,12 @@ case ${1:-} in
             *'->bootstrap()'*) ;;
             *) exit 46 ;;
         esac
+        case ${2:-} in
+            *'app.maintenance.driver'*) [ ! -f .unsupported-maintenance ]; exit $? ;;
+        esac
         [ -f storage/framework/down ] ;;
     down) [ "$FAIL_DOWN" != true ] || exit 43; mkdir -p storage/framework; : >storage/framework/down ;;
-    up) [ "$FAIL_UP" != true ] || exit 44; rm -f storage/framework/down ;;
+    up) [ "$FAIL_UP" != true ] || exit 44; rm -f storage/framework/down storage/framework/maintenance.php ;;
     migrate) [ "$FAIL_MIGRATION" != true ] || exit 42 ;;
     config:cache) [ "$FAIL_CACHE" != true ] || exit 47 ;;
 esac
@@ -547,6 +551,45 @@ bash "$script" finalize app real-rollback "$php" >/dev/null
 check "real-directory rollback restores exact prior metadata" test "$(status_field real-rollback live_release)" = "$prior_real_release"
 check "real-directory rollback proves prior code serving" test "$(status_field real-rollback live_state)" = serving
 check_expr "real-directory rollback never restores a symlinked vhost ancestor" '[ -d "$HOME/app" ] && [ ! -L "$HOME/app" ]'
+
+# A selected candidate may no longer bootstrap after cache refresh or live smoke.
+for rollback_layout in stable-directory release-symlink; do
+    for failed_phase in caches smoke; do
+        setup; make_legacy
+        broken_release="broken-$rollback_layout-$failed_phase"
+        if [ "$rollback_layout" = stable-directory ]; then
+            begin_and_upload_directory "$broken_release" rollback
+        else
+            begin_and_upload "$broken_release" rollback
+        fi
+        preflight_quiesce "$broken_release"
+        bash "$script" prepare app "$broken_release" "$php" >/dev/null
+        prior_id=$(sed -n 's/^release=//p' "$HOME/app/.deploy-release")
+        bash "$script" risk app "$broken_release" "$php" >/dev/null
+        bash "$script" activate app "$broken_release" "$php" >/dev/null
+        if [ "$failed_phase" = smoke ]; then
+            if [ "$rollback_layout" = stable-directory ]; then bash "$script" refresh-caches app "$broken_release" "$php" '' config:cache >/dev/null; fi
+            bash "$script" serve app "$broken_release" "$php" >/dev/null
+        fi
+        : > "$HOME/app/.candidate-broken"
+        rm "$HOME/app/vendor/autoload.php"
+        bash "$script" finalize app "$broken_release" "$php" >/dev/null 2>&1
+        check "$rollback_layout $failed_phase bootstrap failure restores prior identity" test "$(status_field "$broken_release" live_release)" = "$prior_id"
+        check "$rollback_layout $failed_phase bootstrap failure restores prior serving" test "$(status_field "$broken_release" live_state)" = serving
+        check_expr "$rollback_layout $failed_phase bootstrap failure restores cron and releases lock" '[ -s "$CRONTAB_FILE" ] && [ ! -e "$HOME/.deployments/app/deploy.lock" ] && [ ! -e "$HOME/app/storage/framework/maintenance.php" ]'
+    done
+done
+
+setup; make_legacy; begin_and_upload_directory broken-unsupported-store rollback; preflight_quiesce broken-unsupported-store
+bash "$script" prepare app broken-unsupported-store "$php" >/dev/null
+bash "$script" risk app broken-unsupported-store "$php" >/dev/null
+bash "$script" activate app broken-unsupported-store "$php" >/dev/null
+prior_target=$(cat "$HOME/.deployments/app/state/broken-unsupported-store/previous_target")
+: > "$HOME/app/.candidate-broken"
+: > "$HOME/$prior_target/.unsupported-maintenance"
+bash "$script" finalize app broken-unsupported-store "$php" >/dev/null 2>&1
+check "unbootable rollback refuses an unsupported maintenance backend" test "$?" -ne 0
+check_expr "unsupported rollback backend retains lock and paused cron" '[ -d "$HOME/.deployments/app/deploy.lock" ] && [ ! -s "$CRONTAB_FILE" ]'
 
 setup; make_legacy; begin_and_upload_directory real-rollback-commit-tamper rollback; preflight_quiesce real-rollback-commit-tamper; bash "$script" prepare app real-rollback-commit-tamper "$php" >/dev/null; bash "$script" risk app real-rollback-commit-tamper "$php" >/dev/null; bash "$script" activate app real-rollback-commit-tamper "$php" >/dev/null
 transaction="$HOME/.deployments/app/state/real-rollback-commit-tamper"; prior_target=$(cat "$transaction/previous_target"); mv -T "$HOME/app" "$candidate"; mv -T "$HOME/$prior_target" "$HOME/app"; sed -i 's/^commit=.*/commit=deadbeef/' "$HOME/app/.deploy-release"; : >"$PHP_LOG"

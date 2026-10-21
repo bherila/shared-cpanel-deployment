@@ -279,6 +279,10 @@ transaction unlocks. Selection and service state are always reported separately.
 
 `failure-policy: rollback` restores the retained prior directory (or prior stable symlink in the
 compatibility layout), prior app cron lines and serving state.
+If selected candidate code cannot bootstrap to enter maintenance, recovery can use the exact
+retained prior release when both releases share the managed storage directory and that prior
+release uses file-backed maintenance. It proves the retained identity before executing prior code,
+keeps a pre-bootstrap maintenance response during restoration, then verifies prior code is serving.
 It does not and cannot roll back the database. Use it only when every migration in the release follows
 an expand/contract plan compatible with the prior code. Otherwise inspect the failure and schema before
 performing a manual code rollback.
