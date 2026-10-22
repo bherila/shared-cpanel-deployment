@@ -80,7 +80,7 @@ implicit behavior change.
 | `deployment-mode` | `atomic` | Safe v2 versioned releases. `in-place` is the explicit v1 escape hatch. |
 | `atomic-layout` | `stable-directory` | Keeps `~/<deploy-dir>` real for cPanel/LiteSpeed. `release-symlink` is the v2.0 compatibility layout for proven hosts. |
 | `persistent-paths` | `storage` | Runtime files or directories shared by atomic releases; declare every server-authoritative path. |
-| `retain-releases` | `3` | Minimum 2; selected and prior releases are protected. |
+| `retain-releases` | `3` | Minimum 2, or `0` to remove inactive code after verified finalization. Selected code and incomplete transactions are always protected. |
 | `deploy-lock-timeout` | `21600` | Diagnostic expected duration stored with the lock. v2 never takes over an aged lock automatically. |
 | `recovery-release-id` | empty | Explicitly finalize that interrupted transaction before a new deploy, proceeding only after the selected application is proven serving. |
 | `failure-policy` | `maintenance` | `rollback` opts into serving prior code after DB changes and requires expand/contract compatibility. |
@@ -291,7 +291,10 @@ One app-scoped remote transaction is allowed at a time. Automatic age-based take
 long migration can outlive any lease, and overlapping it is unsafe. After proving the owning workflow
 and remote processes have stopped, an operator must recover/remove an abandoned lock deliberately.
 Every successfully finalized failure becomes retention-eligible; cleanup preserves the live release,
-the prior release and genuinely incomplete transactions.
+the prior release and genuinely incomplete transactions by default. Set `retain-releases: '0'` to
+discard inactive code, including the prior release, after verified finalization. This does not remove
+the rollback copy while a deployment is in progress, or any evidence after incomplete recovery.
+With zero retained history, a later manual rollback requires a new deployment of an earlier commit.
 
 Initialization prepares unique private lock, transaction and candidate directories before publishing
 canonical names. Every owner/start/timeout and transaction record is built with exclusive, descriptor-bound

@@ -79,10 +79,10 @@ make_legacy() {
 }
 
 begin_and_upload() {
-    local release=$1 policy=${2:-maintenance} initial
+    local release=$1 policy=${2:-maintenance} retain=${3:-3} initial
     initial=''
     [ -d "$HOME/app" ] && [ ! -L "$HOME/app" ] && initial=$commit
-    bash "$script" begin app "$release" "$commit" 7200 3 "$policy" "$initial" storage >/dev/null
+    bash "$script" begin app "$release" "$commit" 7200 "$retain" "$policy" "$initial" storage >/dev/null
     candidate="$HOME/.deployments/app/releases/$release"
     mkdir -p "$candidate/storage/framework" "$candidate/storage/app" "$candidate/public" "$candidate/vendor" "$candidate/bootstrap"
     : >"$candidate/artisan"
@@ -459,9 +459,9 @@ check "an unmarked candidate with a wrong runtime has cron paused" test ! -s "$C
 # activation renames are durably recoverable, and v2.0 symlink deployments can
 # migrate without changing the selected code or persistent state.
 begin_and_upload_directory() {
-    local release=$1 policy=${2:-maintenance} initial=''
+    local release=$1 policy=${2:-maintenance} retain=${3:-3} initial=''
     [ -d "$HOME/app" ] && [ ! -L "$HOME/app" ] && [ ! -f "$HOME/app/.deploy-release" ] && initial=$commit
-    bash "$script" begin app "$release" "$commit" 7200 3 "$policy" "$initial" stable-directory storage >/dev/null
+    bash "$script" begin app "$release" "$commit" 7200 "$retain" "$policy" "$initial" stable-directory storage >/dev/null
     candidate="$HOME/.deployments/app/releases/$release"
     mkdir -p "$candidate/storage/framework" "$candidate/storage/app" "$candidate/public" "$candidate/vendor" "$candidate/bootstrap"
     : >"$candidate/artisan"; : >"$candidate/vendor/autoload.php"; : >"$candidate/bootstrap/app.php"
@@ -656,6 +656,61 @@ SH
     check "generation $failed_command failure releases its owned lock" test ! -e "$HOME/.deployments/app/deploy.lock"
     check "generation $failed_command failure leaves no transaction" test ! -e "$HOME/.deployments/app/state/quota-failure"
 done
+
+# Zero history retains the rollback copy until finalization and never deletes live runtime data.
+setup; make_legacy; begin_and_upload_directory zero-history rollback 0
+preflight_quiesce zero-history; bash "$script" prepare app zero-history "$php" >/dev/null
+old_real_release=$(sed -n 's/^release=//p' "$HOME/app/.deploy-release")
+bash "$script" risk app zero-history "$php" >/dev/null
+bash "$script" activate app zero-history "$php" >/dev/null
+check "zero history keeps rollback code during deployment" test -f "$HOME/.deployments/app/releases/$old_real_release/.deploy-release"
+mkdir -p "$HOME/.deployments/app/releases/pending-zero" "$HOME/.deployments/app/state/pending-zero"
+printf 'risk\n' >"$HOME/.deployments/app/state/pending-zero/phase"
+bash "$script" refresh-caches app zero-history "$php" '' config:cache >/dev/null
+bash "$script" serve app zero-history "$php" >/dev/null
+bash "$script" commit app zero-history "$php" >/dev/null
+bash "$script" finalize app zero-history "$php" >/dev/null
+check "zero history removes completed prior code after success" test ! -e "$HOME/.deployments/app/releases/$old_real_release"
+check "zero history preserves exact selected stable release" test "$(status_field zero-history live_release)" = zero-history
+check "zero history preserves persistent application data" grep -Fqx runtime "$HOME/app/storage/app/live.txt"
+check "zero history preserves an incomplete foreign transaction" test -d "$HOME/.deployments/app/releases/pending-zero"
+
+setup; make_legacy; begin_and_upload zero-symlink rollback 0
+preflight_quiesce zero-symlink; bash "$script" prepare app zero-symlink "$php" >/dev/null
+bash "$script" risk app zero-symlink "$php" >/dev/null
+bash "$script" activate app zero-symlink "$php" >/dev/null
+bash "$script" serve app zero-symlink "$php" >/dev/null
+bash "$script" commit app zero-symlink "$php" >/dev/null
+bash "$script" finalize app zero-symlink "$php" >/dev/null
+check "zero history keeps live symlink target" test -f "$HOME/.deployments/app/releases/zero-symlink/.deploy-release"
+check "zero history removes all inactive symlink-layout code" test "$(find "$HOME/.deployments/app/releases" -mindepth 1 -maxdepth 1 -type d | wc -l)" -eq 1
+
+setup; make_legacy; begin_and_upload_directory zero-rollback rollback 0
+preflight_quiesce zero-rollback; bash "$script" prepare app zero-rollback "$php" >/dev/null
+old_real_release=$(sed -n 's/^release=//p' "$HOME/app/.deploy-release")
+bash "$script" risk app zero-rollback "$php" >/dev/null
+bash "$script" activate app zero-rollback "$php" >/dev/null
+export FAIL_UP=true
+bash "$script" finalize app zero-rollback "$php" >/dev/null 2>&1
+check "zero history refuses incomplete recovery" test "$?" -ne 0
+check "zero history preserves failed candidate during incomplete recovery" test -d "$HOME/.deployments/app/releases/zero-rollback"
+check "zero history preserves retained lock during incomplete recovery" test -d "$HOME/.deployments/app/deploy.lock"
+export FAIL_UP=false
+bash "$script" finalize app zero-rollback "$php" >/dev/null
+check "zero history removes failed code only after rollback succeeds" test ! -e "$HOME/.deployments/app/releases/zero-rollback"
+check "zero history preserves the selected recovered release" test "$(status_field zero-rollback live_release)" = "$old_real_release"
+check "zero history restores the application scheduler" grep -Fq '# JOB:app-scheduler' "$CRONTAB_FILE"
+
+setup; make_legacy; begin_and_upload zero-maintenance maintenance 0
+preflight_quiesce zero-maintenance; bash "$script" prepare app zero-maintenance "$php" >/dev/null
+bash "$script" risk app zero-maintenance "$php" >/dev/null
+bash "$script" activate app zero-maintenance "$php" >/dev/null
+bash "$script" finalize app zero-maintenance "$php" >/dev/null 2>&1
+check "zero history preserves all code when finalized selection remains in maintenance" test "$(find "$HOME/.deployments/app/releases" -mindepth 1 -maxdepth 1 -type d | wc -l)" -eq 2
+
+setup
+bash "$script" begin app invalid-one "$commit" 7200 1 rollback '' storage >/dev/null 2>&1
+check "one retained release remains an invalid ambiguous policy" test "$?" -eq 2
 
 echo "failures: $fails"
 exit "$fails"
