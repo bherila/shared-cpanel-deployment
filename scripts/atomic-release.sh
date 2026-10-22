@@ -889,7 +889,7 @@ begin() {
     esac
     [[ $commit =~ ^[0-9A-Fa-f]{7,64}$ ]] || { echo "::error::Source commit must be a 7-64 digit hexadecimal revision." >&2; exit 2; }
     [[ $lock_seconds =~ ^[1-9][0-9]*$ ]] || { echo "::error::deploy-lock-timeout must be positive seconds." >&2; exit 2; }
-    if [[ ! $retain =~ ^[0-9]+$ ]] || [ "$retain" -lt 2 ]; then echo "::error::retain-releases must be at least 2." >&2; exit 2; fi
+    if [[ ! $retain =~ ^[0-9]+$ ]] || { [ "$retain" != 0 ] && [ "$retain" -lt 2 ]; }; then echo "::error::retain-releases must be 0 or at least 2." >&2; exit 2; fi
     case $failure_policy in maintenance | rollback) ;; *) echo "::error::failure-policy must be maintenance or rollback." >&2; exit 2 ;; esac
     if [ -n "$initial_live_commit" ] && [[ ! $initial_live_commit =~ ^[0-9A-Fa-f]{7,64}$ ]]; then
         echo "::error::initial-live-commit must be empty or a 7-64 digit hexadecimal revision." >&2
@@ -1420,9 +1420,16 @@ commit_release() {
 }
 
 cleanup_releases() {
-    local retain live_target previous inventory item name kept=0 pending=false
+    local php=$1 memory=${2:-} retain live_target live_root previous inventory item name kept=0 pending=false
     read_value retain; retain=$REPLY
     live_target=$(selected_target)
+    if [ "$retain" = 0 ]; then
+        live_root=$(root_for_target "$live_target") || return 1
+        if ! require_serving "$php" "$live_root" "$memory"; then
+            echo 'Preserved inactive code because the selected application is not proven serving.'
+            return 0
+        fi
+    fi
     read_value previous_target || REPLY=none
     previous=$REPLY
     inventory=$(find "$releases" -mindepth 1 -maxdepth 1 -type d -printf '%T@ %f\n' | sort -nr) || {
@@ -1433,7 +1440,11 @@ cleanup_releases() {
         name=${item#* }
         plain_name "$name" || continue
         if [ -d "$state_root/$name" ] && [ "$(cat "$state_root/$name/phase" 2>/dev/null || true)" != finalized ]; then pending=true; else pending=false; fi
-        if [ "$name" = "${live_target##*/}" ] || [ "$name" = "${previous##*/}" ] || [ "$pending" = true ]; then
+        # This runs only after finalization has proved the selected serving/recovery state.
+        # A zero history budget still protects the live symlink target and every incomplete
+        # transaction, but the completed transaction no longer needs its prior code copy.
+        if [ "$name" = "${live_target##*/}" ] || [ "$pending" = true ] \
+            || { [ "$retain" != 0 ] && [ "$name" = "${previous##*/}" ]; }; then
             kept=$((kept + 1))
         elif [ "$kept" -lt "$retain" ]; then
             kept=$((kept + 1))
@@ -1760,7 +1771,7 @@ finalize() {
     report_status "$php" "$memory" || recovery_status=1
     if [ "$recovery_status" -eq 0 ]; then
         write_value phase finalized
-        cleanup_releases || recovery_status=$?
+        cleanup_releases "$php" "$memory" || recovery_status=$?
     fi
     if [ "$recovery_status" -eq 0 ]; then rm -rf "$transaction" || recovery_status=$?; fi
     if [ "$recovery_status" -eq 0 ]; then release_lock || recovery_status=$?; fi

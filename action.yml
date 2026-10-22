@@ -63,7 +63,7 @@ inputs:
     required: false
     default: storage
   retain-releases:
-    description: Number of versioned releases to retain after a healthy atomic deployment (minimum 2).
+    description: Number of versioned releases to retain (minimum 2), or 0 to remove inactive code after verified finalization. In-flight recovery material is always preserved.
     required: false
     default: '3'
   deploy-lock-timeout:
@@ -438,8 +438,8 @@ runs:
         allow_unlimited=true
         if [ "$OPERATIONAL_AUDIT" = true ] || [ "$RUNTIME_AUDIT" = true ]; then allow_unlimited=false; fi
         bash "$GITHUB_ACTION_PATH/scripts/validate-artisan-memory-limit.sh" "$ARTISAN_MEMORY_LIMIT" "$allow_unlimited"
-        if [[ ! $RETAIN_RELEASES =~ ^[0-9]+$ ]] || [ "$RETAIN_RELEASES" -lt 2 ]; then
-          echo "::error::retain-releases must be an integer of at least 2." >&2; exit 2
+        if [[ ! $RETAIN_RELEASES =~ ^[0-9]+$ ]] || { [ "$RETAIN_RELEASES" != 0 ] && [ "$RETAIN_RELEASES" -lt 2 ]; }; then
+          echo "::error::retain-releases must be 0 or an integer of at least 2." >&2; exit 2
         fi
         if [[ ! $LOCK_TIMEOUT =~ ^[1-9][0-9]*$ ]]; then
           echo "::error::deploy-lock-timeout must be positive seconds." >&2; exit 2
