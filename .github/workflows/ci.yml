@@ -23,6 +23,9 @@ jobs:
       - name: Real Laravel ${{ matrix.laravel }} maintenance probe
         run: bash scripts/test-real-laravel-atomic.sh '${{ matrix.laravel }}'
 
+      - name: Real Laravel ${{ matrix.laravel }} Passport key usability
+        run: bash scripts/test-real-laravel-passport.sh '${{ matrix.laravel }}'
+
   scripts:
     runs-on: ubuntu-24.04
     steps:

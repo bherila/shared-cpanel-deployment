@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 # Keep or create one complete Laravel Passport signing-key pair; never rotate a partial pair.
+# Mode "ensure" never boots the application except to create a missing pair. Mode "verify"
+# changes nothing: it boots the application and proves Passport loads the pair it uses.
 set -euo pipefail
 
-if [ "$#" -lt 3 ] || [ "$#" -gt 5 ]; then
-    echo "usage: ensure-passport-keys.sh <app-dir> <php> <key-directory> [managed-shared-root] [memory-limit]" >&2
+if [ "$#" -lt 3 ] || [ "$#" -gt 6 ]; then
+    echo "usage: ensure-passport-keys.sh <app-dir> <php> <key-directory> [managed-shared-root] [memory-limit] [ensure|verify]" >&2
     exit 2
 fi
 
@@ -12,6 +14,11 @@ php=$2
 key_directory=$3
 managed_shared_root=${4:-}
 memory_limit=${5:-}
+mode=${6:-ensure}
+case $mode in
+    ensure | verify) ;;
+    *) echo "::error::Passport key mode must be ensure or verify." >&2; exit 2 ;;
+esac
 if [[ ! $memory_limit =~ ^([1-9][0-9]*[KMGkmg]|-1)?$ ]]; then
     echo "::error::PHP memory limit must be empty, -1, or a positive K/M/G value." >&2
     exit 2
@@ -68,7 +75,7 @@ for component in "${components[@]}"; do
         exit 1
     fi
 done
-install -d -m 700 "$current"
+[ "$mode" = verify ] || install -d -m 700 "$current"
 
 private="$current/oauth-private.key"
 public="$current/oauth-public.key"
@@ -78,8 +85,11 @@ public_ok=false
 [ -f "$public" ] && [ ! -L "$public" ] && [ -s "$public" ] && public_ok=true
 
 if [ "$private_ok" = true ] && [ "$public_ok" = true ]; then
-    chmod 600 "$private" "$public"
+    [ "$mode" = verify ] || chmod 600 "$private" "$public"
     echo "Passport signing key pair is complete."
+elif [ "$mode" = verify ]; then
+    echo "::error::Passport signing key pair is missing or incomplete." >&2
+    exit 1
 elif [ ! -e "$private" ] && [ ! -e "$public" ]; then
     if [ -n "$memory_limit" ]; then
         (cd "$app" && "$php" -d "memory_limit=$memory_limit" artisan passport:keys --force)
@@ -97,3 +107,38 @@ else
     echo "::error::Passport signing key pair is incomplete; refusing automatic rotation." >&2
     exit 1
 fi
+
+[ "$mode" = verify ] || exit 0
+
+# A complete pair is not necessarily one Passport will load. It refuses a key file other
+# users can read, and an application may load its keys from somewhere other than this
+# directory, so the chmod in ensure mode proves nothing about the files it actually reads.
+# Build both servers the way the web runtime does: an unusable pair otherwise surfaces only
+# on the first token request, after activation. Booting runs the application's providers,
+# so the action calls this mode only after config caching, inside the atomic risk boundary.
+# Only a fixed reason or the exception class is printed, never the message, which can
+# carry host paths into the Actions log.
+php_args=()
+[ -z "$memory_limit" ] || php_args=(-d "memory_limit=$memory_limit")
+# shellcheck disable=SC2016 # PHP source, not shell expansions.
+if ! (cd "$app" && "$php" ${php_args[@]+"${php_args[@]}"} -d display_errors=0 -d log_errors=0 -r '
+    try {
+        require "vendor/autoload.php";
+        $app = require "bootstrap/app.php";
+        $app->make(Illuminate\Contracts\Console\Kernel::class)->bootstrap();
+        $app->make(League\OAuth2\Server\AuthorizationServer::class);
+        $app->make(League\OAuth2\Server\ResourceServer::class);
+    } catch (Throwable $error) {
+        // An anonymous class name embeds a NUL byte and its defining file path.
+        $class = get_class($error);
+        $named = $class !== "" && strspn($class, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_\\") === strlen($class);
+        fwrite(STDERR, str_contains($error->getMessage(), "permissions are not correct")
+            ? "A Passport key file is readable by other users; Passport requires mode 0600 or 0660.\n"
+            : "Passport could not be built: ".($named ? $class : "an anonymous exception")."\n");
+        exit(1);
+    }
+'); then
+    echo "::error::Passport cannot load its signing keys, so every token request would fail." >&2
+    exit 1
+fi
+echo "Passport loads the signing key pair."
