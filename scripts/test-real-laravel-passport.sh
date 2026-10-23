@@ -71,5 +71,17 @@ run; status=$?
 check "an unparseable key fails with only its exception class" \
     '[ "$status" -eq 1 ] && grep -Eq "Passport could not be built: [A-Za-z\\\\]+$" "$scratch/out" && ! grep -Fq "$elsewhere" "$scratch/out"'
 
+# A migration-first in-place deployment ensured the pair against the previous code. Verify
+# mode checks what the uploaded release loads, here a refused key outside the declared
+# directory, and leaves it exactly as it found it.
+cp "$keys/oauth-public.key" "$elsewhere/oauth-public.key"
+chmod 644 "$elsewhere/oauth-public.key"
+bash "$script" app "$php_binary" storage/app/private/oauth '' '' verify >"$scratch/out" 2>&1; status=$?
+check "verify mode refuses the key the uploaded release loads, without repairing it" \
+    '[ "$status" -eq 1 ] && grep -Fq "requires mode 0600 or 0660" "$scratch/out" && [ -n "$(find "$elsewhere/oauth-public.key" -perm 644 -print)" ]'
+chmod 600 "$elsewhere/oauth-public.key"
+bash "$script" app "$php_binary" storage/app/private/oauth '' '' verify >"$scratch/out" 2>&1; status=$?
+check "verify mode accepts the same pair once it is private" '[ "$status" -eq 0 ]'
+
 echo "failures: $fails"
 exit "$fails"

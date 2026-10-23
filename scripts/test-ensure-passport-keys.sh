@@ -78,6 +78,31 @@ check "a pair Passport cannot load fails the deployment without rotation" \
 setup
 mkdir -p "$keys"
 printf private >"$keys/oauth-private.key"
+printf public >"$keys/oauth-public.key"
+chmod 644 "$keys/oauth-private.key" "$keys/oauth-public.key"
+run example-laravel "$php" storage/app/private/oauth '' '' verify; status=$?
+check "verify mode builds Passport but changes nothing" \
+    '[ "$status" -eq 0 ] && [ "$(calls)" -eq 0 ] && [ "$(checks)" -eq 1 ] && [ -n "$(find "$keys/oauth-public.key" -perm 644 -print)" ] && grep -Fxq "Passport loads the signing key pair." "$root/out"'
+export FAKE_PASSPORT_UNUSABLE=true
+run example-laravel "$php" storage/app/private/oauth '' '' verify; status=$?
+check "verify mode fails when Passport cannot load the pair" \
+    '[ "$status" -eq 1 ] && [ "$(calls)" -eq 0 ] && grep -Fq "::error::Passport cannot load its signing keys" "$root/out"'
+
+setup
+run example-laravel "$php" storage/app/private/oauth '' '' verify; status=$?
+check "verify mode never creates a missing pair or its directory" \
+    '[ "$status" -eq 1 ] && [ "$(calls)" -eq 0 ] && [ "$(checks)" -eq 0 ] && [ ! -e "$keys" ] && grep -Fq "missing or incomplete" "$root/out"'
+mkdir -p "$keys"
+printf private >"$keys/oauth-private.key"
+run example-laravel "$php" storage/app/private/oauth '' '' verify; status=$?
+check "verify mode refuses a partial pair without completing it" \
+    '[ "$status" -eq 1 ] && [ "$(calls)" -eq 0 ] && [ ! -e "$keys/oauth-public.key" ]'
+run example-laravel "$php" storage/app/private/oauth '' '' rotate; status=$?
+check "an unknown mode is refused before PHP" '[ "$status" -eq 2 ] && [ "$(calls)" -eq 0 ] && [ "$(checks)" -eq 0 ]'
+
+setup
+mkdir -p "$keys"
+printf private >"$keys/oauth-private.key"
 run example-laravel "$php" storage/app/private/oauth; status=$?
 check "a partial pair fails without rotation" '[ "$status" -eq 1 ] && [ "$(calls)" -eq 0 ] && [ "$(checks)" -eq 0 ] && [ -s "$keys/oauth-private.key" ] && [ ! -e "$keys/oauth-public.key" ]'
 
@@ -136,13 +161,19 @@ check "a complete shared pair stays unchanged when the memory limit changes" \
     '[ "$status" -eq 0 ] && [ "$(calls)" -eq 1 ] && [ "$(cat "$keys/oauth-private.key")" = private ] && [ "$(cat "$keys/oauth-public.key")" = public ]'
 
 # Execute each actual composite transport body, with only SSH replaced by local Bash.
-for phase in before-upload after-upload atomic; do
+for phase in before-upload after-upload atomic verify-after-upload; do
     for memory_limit in '' 1G; do
         setup
         step='Ensure Passport signing keys'
         export DEPLOY_DIR=example-laravel SHARED_ROOT=''
         if [ "$phase" = before-upload ]; then
             step='Ensure Passport signing keys before application upload'
+        elif [ "$phase" = verify-after-upload ]; then
+            step='Verify Passport loads the signing keys from the uploaded application'
+            keys="$app/storage/app/private/oauth"
+            mkdir -p "$keys"
+            printf private >"$keys/oauth-private.key"
+            printf public >"$keys/oauth-public.key"
         elif [ "$phase" = atomic ]; then
             export DEPLOY_DIR=.deployments/example-laravel/releases/release-3
             export SHARED_ROOT=.deployments/example-laravel/shared
@@ -176,8 +207,10 @@ SH
         export TARGET=fixture PHP_BINARY="$php" KEY_DIRECTORY=storage/app/private/oauth
         export ARTISAN_MEMORY_LIMIT="$memory_limit" GITHUB_ACTION_PATH="$here/.."
         PATH="$root/bin:$PATH" bash "$root/step.sh" >"$root/out" 2>&1; status=$?
-        check "the actual $phase transport preserves limit '${memory_limit:-host-default}' and creates the guarded pair" \
-            '[ "$status" -eq 0 ] && [ "$(calls)" -eq 1 ] && [ "$(checks)" -eq 1 ] && [ -s "$keys/oauth-private.key" ] && [ -s "$keys/oauth-public.key" ] && { if [ -n "$memory_limit" ]; then [ "$(cat "$PASSPORT_MEMORY_LOG")" = "memory_limit=$memory_limit" ]; else [ ! -e "$PASSPORT_MEMORY_LOG" ]; fi; }'
+        expected_calls=1
+        [ "$phase" != verify-after-upload ] || expected_calls=0
+        check "the actual $phase transport preserves limit '${memory_limit:-host-default}' and leaves a loadable pair" \
+            '[ "$status" -eq 0 ] && [ "$(calls)" -eq "$expected_calls" ] && [ "$(checks)" -eq 1 ] && grep -Eq " (memory_limit=${memory_limit:-x}|-) present$" "$PASSPORT_CHECK_LOG" && [ -s "$keys/oauth-private.key" ] && [ -s "$keys/oauth-public.key" ] && { [ "$phase" = verify-after-upload ] || if [ -n "$memory_limit" ]; then [ "$(cat "$PASSPORT_MEMORY_LOG")" = "memory_limit=$memory_limit" ]; else [ ! -e "$PASSPORT_MEMORY_LOG" ]; fi; }'
     done
 done
 

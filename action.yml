@@ -1006,6 +1006,22 @@ runs:
         ssh "$TARGET" "bash -s -- $(printf '%q ' "$DEPLOY_DIR" "$PHP_BINARY" "$ARTISAN_MEMORY_LIMIT" "${commands[@]}")" \
           <"$GITHUB_ACTION_PATH/scripts/remote-artisan.sh"
 
+    - name: Verify Passport loads the signing keys from the uploaded application
+      # A migration-first in-place deployment ensured the keys against the previous code,
+      # before upload. The uploaded release may load them differently, so prove it here.
+      if: inputs.deployment-mode == 'in-place' && inputs.migration-order == 'before-upload' && inputs.passport-key-directory != ''
+      shell: bash
+      env:
+        TARGET: ${{ steps.ssh.outputs.target }}
+        DEPLOY_DIR: ${{ inputs.deploy-dir }}
+        PHP_BINARY: ${{ steps.resolve.outputs.php }}
+        KEY_DIRECTORY: ${{ inputs.passport-key-directory }}
+        ARTISAN_MEMORY_LIMIT: ${{ inputs.artisan-memory-limit }}
+      run: |
+        set -euo pipefail
+        ssh "$TARGET" "bash -s -- $(printf '%q ' "$DEPLOY_DIR" "$PHP_BINARY" "$KEY_DIRECTORY" '' "$ARTISAN_MEMORY_LIMIT" verify)" \
+          <"$GITHUB_ACTION_PATH/scripts/ensure-passport-keys.sh"
+
     - name: Install this application's cron lines
       if: inputs.deployment-mode == 'in-place' && inputs.install-cron == 'true'
       shell: bash
