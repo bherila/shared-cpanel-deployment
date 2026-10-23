@@ -124,9 +124,12 @@ if ! (cd "$app" && "$php" ${php_args[@]+"${php_args[@]}"} -d display_errors=0 -d
         $app->make(League\OAuth2\Server\AuthorizationServer::class);
         $app->make(League\OAuth2\Server\ResourceServer::class);
     } catch (Throwable $error) {
+        // An anonymous class name embeds a NUL byte and its defining file path.
+        $class = get_class($error);
+        $named = $class !== "" && strspn($class, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_\\") === strlen($class);
         fwrite(STDERR, str_contains($error->getMessage(), "permissions are not correct")
             ? "A Passport key file is readable by other users; Passport requires mode 0600 or 0660.\n"
-            : "Passport could not be built: ".get_class($error)."\n");
+            : "Passport could not be built: ".($named ? $class : "an anonymous exception")."\n");
         exit(1);
     }
 '); then

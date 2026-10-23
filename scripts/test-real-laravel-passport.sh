@@ -37,7 +37,8 @@ php -r '
     $file = "app/Providers/AppServiceProvider.php";
     $source = file_get_contents($file);
     $boot = "public function boot(): void\n    {\n";
-    $line = "        \\Laravel\\Passport\\Passport::loadKeysFrom(env(\"OAUTH_KEY_PATH\", storage_path(\"app/private/oauth\")));\n";
+    $line = "        \\Laravel\\Passport\\Passport::loadKeysFrom(env(\"OAUTH_KEY_PATH\", storage_path(\"app/private/oauth\")));\n"
+        ."        if (env(\"OAUTH_FAIL_ANONYMOUS\")) { \$this->app->bind(\\League\\OAuth2\\Server\\ResourceServer::class, static function () { throw new class(\"fixture\") extends \\RuntimeException {}; }); }\n";
     if (substr_count($source, $boot) !== 1) { exit(1); }
     file_put_contents($file, str_replace($boot, $boot.$line, $source));
 ' || { echo "could not register the fixture key path" >&2; exit 1; }
@@ -82,6 +83,13 @@ check "verify mode refuses the key the uploaded release loads, without repairing
 chmod 600 "$elsewhere/oauth-public.key"
 bash "$script" app "$php_binary" storage/app/private/oauth '' '' verify >"$scratch/out" 2>&1; status=$?
 check "verify mode accepts the same pair once it is private" '[ "$status" -eq 0 ]'
+
+# An anonymous exception's class name carries a NUL byte and the defining file path.
+echo "OAUTH_FAIL_ANONYMOUS=1" >>.env
+run; status=$?
+check "an anonymous exception is named generically, with no path or control byte" \
+    '[ "$status" -eq 1 ] && grep -Fxq "Passport could not be built: an anonymous exception" "$scratch/out" && ! grep -Fq "@anonymous" "$scratch/out" && ! grep -Fq "$HOME" "$scratch/out" && ! tr -d "\n" <"$scratch/out" | grep -q "[^[:print:]]"'
+sed -i.bak '/^OAUTH_FAIL_ANONYMOUS=/d' .env && rm -f .env.bak
 
 echo "failures: $fails"
 exit "$fails"
