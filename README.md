@@ -357,8 +357,10 @@ candidate `.env` is installed. Values are never printed.
 
 **Persistent Passport and branding files.** Atomic mode refuses a Passport directory not covered by a
 declared persistent path. Passport setup keeps an existing complete signing pair,
-creates keys only when neither file exists, and refuses a half-present pair. It then makes both files
-0600 and requires the application to build Passport's authorization and resource servers. Passport
+creates keys only when neither file exists, and refuses a half-present pair, then makes both files
+0600; it boots the application only to create a missing pair. After config caching, inside the atomic
+risk boundary and before activation, a verify step requires the uploaded application to build
+Passport's authorization and resource servers, changing nothing. Passport
 refuses a key file other users can read, and an application may load keys from somewhere other than
 the declared directory; either would otherwise fail every token request after activation while `/up`
 and unauthenticated MCP probes still pass. The failure names a fixed reason or the exception class,

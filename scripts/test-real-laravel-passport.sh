@@ -19,7 +19,11 @@ export HOME="$scratch/home"
 mkdir -p "$HOME"
 fails=0
 check() { if eval "$2"; then echo "ok   - $1"; else echo "FAIL - $1"; cat "$scratch/out" >&2; fails=$((fails + 1)); fi; }
-run() { bash "$script" app "$php_binary" storage/app/private/oauth >"$scratch/out" 2>&1; }
+# The action's sequence: ensure (keep or create, no boot), then verify after config caching.
+run() {
+    bash "$script" app "$php_binary" storage/app/private/oauth >"$scratch/out" 2>&1 \
+        && bash "$script" app "$php_binary" storage/app/private/oauth '' '' verify >>"$scratch/out" 2>&1
+}
 
 set -e
 composer create-project --no-interaction --prefer-dist "laravel/laravel:$version" "$HOME/app" >/dev/null 2>&1
@@ -38,6 +42,7 @@ php -r '
     $source = file_get_contents($file);
     $boot = "public function boot(): void\n    {\n";
     $line = "        \\Laravel\\Passport\\Passport::loadKeysFrom(env(\"OAUTH_KEY_PATH\", storage_path(\"app/private/oauth\")));\n"
+        ."        if (env(\"OAUTH_BOOT_MARKER\")) { touch(env(\"OAUTH_BOOT_MARKER\")); }\n"
         ."        if (env(\"OAUTH_FAIL_ANONYMOUS\")) { \$this->app->bind(\\League\\OAuth2\\Server\\ResourceServer::class, static function () { throw new class(\"fixture\") extends \\RuntimeException {}; }); }\n";
     if (substr_count($source, $boot) !== 1) { exit(1); }
     file_put_contents($file, str_replace($boot, $boot.$line, $source));
@@ -49,6 +54,16 @@ check "a pair created by passport:keys loads" \
     '[ "$status" -eq 0 ] && [ -s "$keys/oauth-private.key" ] && grep -Fxq "Passport loads the signing key pair." "$scratch/out"'
 run; status=$?
 check "the kept pair loads again" '[ "$status" -eq 0 ] && grep -Fxq "Passport loads the signing key pair." "$scratch/out"'
+
+# Booting runs the application's providers, which may touch the database, so only verify
+# mode (run inside the atomic risk boundary) may boot it for an existing pair.
+marker="$scratch/booted"
+echo "OAUTH_BOOT_MARKER=$marker" >>.env
+bash "$script" app "$php_binary" storage/app/private/oauth >"$scratch/out" 2>&1; status=$?
+check "ensure mode keeps an existing pair without booting the application" '[ "$status" -eq 0 ] && [ ! -e "$marker" ]'
+bash "$script" app "$php_binary" storage/app/private/oauth '' '' verify >"$scratch/out" 2>&1; status=$?
+check "verify mode boots the application to build Passport" '[ "$status" -eq 0 ] && [ -e "$marker" ]'
+sed -i.bak '/^OAUTH_BOOT_MARKER=/d' .env && rm -f .env.bak
 
 # The declared directory is complete and private, but the application reads another pair,
 # with the public key readable by others: the configuration production had on 2026-10-22.

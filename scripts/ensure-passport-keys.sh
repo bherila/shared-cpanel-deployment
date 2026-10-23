@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Keep or create one complete Laravel Passport signing-key pair; never rotate a partial pair.
-# Mode "verify" changes nothing: it only proves Passport loads the pair the application has.
+# Mode "ensure" never boots the application except to create a missing pair. Mode "verify"
+# changes nothing: it boots the application and proves Passport loads the pair it uses.
 set -euo pipefail
 
 if [ "$#" -lt 3 ] || [ "$#" -gt 6 ]; then
@@ -107,12 +108,16 @@ else
     exit 1
 fi
 
+[ "$mode" = verify ] || exit 0
+
 # A complete pair is not necessarily one Passport will load. It refuses a key file other
 # users can read, and an application may load its keys from somewhere other than this
-# directory, so the chmod above proves nothing about the files it actually reads. Build
-# both servers the way the web runtime does: an unusable pair otherwise surfaces only on
-# the first token request, after activation. Only a fixed reason or the exception class is
-# printed, never the message, which can carry host paths into the Actions log.
+# directory, so the chmod in ensure mode proves nothing about the files it actually reads.
+# Build both servers the way the web runtime does: an unusable pair otherwise surfaces only
+# on the first token request, after activation. Booting runs the application's providers,
+# so the action calls this mode only after config caching, inside the atomic risk boundary.
+# Only a fixed reason or the exception class is printed, never the message, which can
+# carry host paths into the Actions log.
 php_args=()
 [ -z "$memory_limit" ] || php_args=(-d "memory_limit=$memory_limit")
 # shellcheck disable=SC2016 # PHP source, not shell expansions.

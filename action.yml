@@ -170,8 +170,9 @@ inputs:
     description: >-
       Relative application path holding oauth-private.key and oauth-public.key. Empty skips Passport
       key setup; otherwise a complete pair is kept, neither creates one, and a partial pair fails.
-      Both files are made 0600, then the application must build Passport's authorization and
-      resource servers, so a pair Passport would refuse at the first token request fails here.
+      Both files are made 0600. After config caching (inside the atomic risk boundary), the
+      uploaded application must build Passport's authorization and resource servers, so a pair
+      Passport would refuse at the first token request fails the deployment before activation.
     required: false
     default: ''
   branding-source:
@@ -1007,19 +1008,22 @@ runs:
           <"$GITHUB_ACTION_PATH/scripts/remote-artisan.sh"
 
     - name: Verify Passport loads the signing keys from the uploaded application
-      # A migration-first in-place deployment ensured the keys against the previous code,
-      # before upload. The uploaded release may load them differently, so prove it here.
-      if: inputs.deployment-mode == 'in-place' && inputs.migration-order == 'before-upload' && inputs.passport-key-directory != ''
+      # The one place the key check boots the application: after the uploaded release's
+      # config is cached, inside the atomic database-risk boundary, before activation. The
+      # ensure steps above only keep or create the pair. In stable-directory layout caches
+      # are built after activation, so this checks the uncached candidate.
+      if: inputs.passport-key-directory != ''
       shell: bash
       env:
         TARGET: ${{ steps.ssh.outputs.target }}
-        DEPLOY_DIR: ${{ inputs.deploy-dir }}
+        DEPLOY_DIR: ${{ steps.resolve.outputs.app-dir }}
+        SHARED_ROOT: ${{ inputs.deployment-mode == 'atomic' && format('.deployments/{0}/shared', inputs.deploy-dir) || '' }}
         PHP_BINARY: ${{ steps.resolve.outputs.php }}
         KEY_DIRECTORY: ${{ inputs.passport-key-directory }}
         ARTISAN_MEMORY_LIMIT: ${{ inputs.artisan-memory-limit }}
       run: |
         set -euo pipefail
-        ssh "$TARGET" "bash -s -- $(printf '%q ' "$DEPLOY_DIR" "$PHP_BINARY" "$KEY_DIRECTORY" '' "$ARTISAN_MEMORY_LIMIT" verify)" \
+        ssh "$TARGET" "bash -s -- $(printf '%q ' "$DEPLOY_DIR" "$PHP_BINARY" "$KEY_DIRECTORY" "$SHARED_ROOT" "$ARTISAN_MEMORY_LIMIT" verify)" \
           <"$GITHUB_ACTION_PATH/scripts/ensure-passport-keys.sh"
 
     - name: Install this application's cron lines
