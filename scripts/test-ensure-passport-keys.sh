@@ -18,6 +18,20 @@ setup() {
     : >"$app/artisan"
     cat >"$php" <<'SH'
 #!/usr/bin/env bash
+# The usability check (php -r) is logged apart from passport:keys, so call counts
+# keep meaning "keys were generated".
+case " $* " in *' -r '*)
+    limit=-
+    [ "${1:-}" != -d ] || [[ ${2:-} != memory_limit=* ]] || limit=$2
+    pair=absent
+    [ ! -s storage/app/private/oauth/oauth-private.key ] || pair=present
+    printf '%s %s %s\n' "$PWD" "$limit" "$pair" >>"$PASSPORT_CHECK_LOG"
+    if [ "${FAKE_PASSPORT_UNUSABLE:-false}" = true ]; then
+        echo 'A Passport key file is readable by other users; Passport requires mode 0600 or 0660.' >&2
+        exit 1
+    fi
+    exit 0 ;;
+esac
 printf '%s\n' "$*" >>"$PASSPORT_LOG"
 if [ "${1:-}" = -d ]; then
     printf '%s\n' "$2" >"$PASSPORT_MEMORY_LOG"
@@ -32,24 +46,40 @@ SH
     chmod +x "$php"
     export PASSPORT_MEMORY_LOG="$root/memory.log"
     export PASSPORT_LOG="$root/passport.log"
+    export PASSPORT_CHECK_LOG="$root/check.log"
     : >"$PASSPORT_LOG"
+    : >"$PASSPORT_CHECK_LOG"
+    unset FAKE_PASSPORT_UNUSABLE
 }
 
 run() { bash "$script" "$@" >"$root/out" 2>&1; }
 check() { if eval "$2"; then echo "ok   - $1"; else echo "FAIL - $1"; fails=$((fails + 1)); fi; }
 calls() { wc -l <"$PASSPORT_LOG" | tr -d ' '; }
+checks() { wc -l <"$PASSPORT_CHECK_LOG" | tr -d ' '; }
 
 setup
 run example-laravel "$php" storage/app/private/oauth; status=$?
 check "an absent pair is created once" '[ "$status" -eq 0 ] && [ "$(calls)" -eq 1 ] && [ -s "$keys/oauth-private.key" ] && [ -s "$keys/oauth-public.key" ]'
 run example-laravel "$php" storage/app/private/oauth; status=$?
 check "a complete pair is preserved" '[ "$status" -eq 0 ] && [ "$(calls)" -eq 1 ] && [ -n "$(find "$keys/oauth-private.key" -perm 600 -print)" ]'
+check "Passport is built from the application after creation and again for the kept pair" \
+    '[ "$(checks)" -eq 2 ] && [ "$(sort -u "$PASSPORT_CHECK_LOG")" = "$app - present" ] && grep -Fxq "Passport loads the signing key pair." "$root/out"'
+
+setup
+mkdir -p "$keys"
+printf private >"$keys/oauth-private.key"
+printf public >"$keys/oauth-public.key"
+chmod 644 "$keys/oauth-private.key" "$keys/oauth-public.key"
+export FAKE_PASSPORT_UNUSABLE=true
+run example-laravel "$php" storage/app/private/oauth; status=$?
+check "a pair Passport cannot load fails the deployment without rotation" \
+    '[ "$status" -eq 1 ] && [ "$(calls)" -eq 0 ] && [ "$(checks)" -eq 1 ] && [ "$(cat "$keys/oauth-private.key")" = private ] && [ "$(cat "$keys/oauth-public.key")" = public ] && grep -Fq "::error::Passport cannot load its signing keys" "$root/out" && grep -Fq "requires mode 0600 or 0660" "$root/out"'
 
 setup
 mkdir -p "$keys"
 printf private >"$keys/oauth-private.key"
 run example-laravel "$php" storage/app/private/oauth; status=$?
-check "a partial pair fails without rotation" '[ "$status" -eq 1 ] && [ "$(calls)" -eq 0 ] && [ -s "$keys/oauth-private.key" ] && [ ! -e "$keys/oauth-public.key" ]'
+check "a partial pair fails without rotation" '[ "$status" -eq 1 ] && [ "$(calls)" -eq 0 ] && [ "$(checks)" -eq 0 ] && [ -s "$keys/oauth-private.key" ] && [ ! -e "$keys/oauth-public.key" ]'
 
 setup
 mkdir -p "$app/storage/app/private"
@@ -79,7 +109,7 @@ for memory_limit in 1G 256M 512k -1; do
     setup
     run example-laravel "$php" storage/app/private/oauth '' "$memory_limit"; status=$?
     check "Passport receives memory limit $memory_limit as one PHP argument" \
-        '[ "$status" -eq 0 ] && [ "$(calls)" -eq 1 ] && [ "$(cat "$PASSPORT_MEMORY_LOG")" = "memory_limit=$memory_limit" ] && grep -Fxq -- "-d memory_limit=$memory_limit artisan passport:keys --force" "$PASSPORT_LOG"'
+        '[ "$status" -eq 0 ] && [ "$(calls)" -eq 1 ] && [ "$(cat "$PASSPORT_MEMORY_LOG")" = "memory_limit=$memory_limit" ] && grep -Fxq -- "-d memory_limit=$memory_limit artisan passport:keys --force" "$PASSPORT_LOG" && grep -Fxq -- "$app memory_limit=$memory_limit present" "$PASSPORT_CHECK_LOG"'
 done
 setup
 run example-laravel "$php" storage/app/private/oauth '' ''; status=$?
@@ -89,7 +119,7 @@ for memory_limit in '1G -d auto_prepend_file=bad' '0M' '1;touch bad' '1G'$'\n''-
     setup
     run example-laravel "$php" storage/app/private/oauth '' "$memory_limit"; status=$?
     check "an invalid Passport limit is rejected before PHP or key-directory writes" \
-        '[ "$status" -eq 2 ] && [ "$(calls)" -eq 0 ] && [ ! -e "$keys" ]'
+        '[ "$status" -eq 2 ] && [ "$(calls)" -eq 0 ] && [ "$(checks)" -eq 0 ] && [ ! -e "$keys" ]'
 done
 setup
 managed="$HOME/.deployments/example-laravel/releases/release-2"
@@ -147,7 +177,7 @@ SH
         export ARTISAN_MEMORY_LIMIT="$memory_limit" GITHUB_ACTION_PATH="$here/.."
         PATH="$root/bin:$PATH" bash "$root/step.sh" >"$root/out" 2>&1; status=$?
         check "the actual $phase transport preserves limit '${memory_limit:-host-default}' and creates the guarded pair" \
-            '[ "$status" -eq 0 ] && [ "$(calls)" -eq 1 ] && [ -s "$keys/oauth-private.key" ] && [ -s "$keys/oauth-public.key" ] && { if [ -n "$memory_limit" ]; then [ "$(cat "$PASSPORT_MEMORY_LOG")" = "memory_limit=$memory_limit" ]; else [ ! -e "$PASSPORT_MEMORY_LOG" ]; fi; }'
+            '[ "$status" -eq 0 ] && [ "$(calls)" -eq 1 ] && [ "$(checks)" -eq 1 ] && [ -s "$keys/oauth-private.key" ] && [ -s "$keys/oauth-public.key" ] && { if [ -n "$memory_limit" ]; then [ "$(cat "$PASSPORT_MEMORY_LOG")" = "memory_limit=$memory_limit" ]; else [ ! -e "$PASSPORT_MEMORY_LOG" ]; fi; }'
     done
 done
 

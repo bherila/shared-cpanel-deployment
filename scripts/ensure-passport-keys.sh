@@ -97,3 +97,31 @@ else
     echo "::error::Passport signing key pair is incomplete; refusing automatic rotation." >&2
     exit 1
 fi
+
+# A complete pair is not necessarily one Passport will load. It refuses a key file other
+# users can read, and an application may load its keys from somewhere other than this
+# directory, so the chmod above proves nothing about the files it actually reads. Build
+# both servers the way the web runtime does: an unusable pair otherwise surfaces only on
+# the first token request, after activation. Only a fixed reason or the exception class is
+# printed, never the message, which can carry host paths into the Actions log.
+php_args=()
+[ -z "$memory_limit" ] || php_args=(-d "memory_limit=$memory_limit")
+# shellcheck disable=SC2016 # PHP source, not shell expansions.
+if ! (cd "$app" && "$php" ${php_args[@]+"${php_args[@]}"} -d display_errors=0 -d log_errors=0 -r '
+    try {
+        require "vendor/autoload.php";
+        $app = require "bootstrap/app.php";
+        $app->make(Illuminate\Contracts\Console\Kernel::class)->bootstrap();
+        $app->make(League\OAuth2\Server\AuthorizationServer::class);
+        $app->make(League\OAuth2\Server\ResourceServer::class);
+    } catch (Throwable $error) {
+        fwrite(STDERR, str_contains($error->getMessage(), "permissions are not correct")
+            ? "A Passport key file is readable by other users; Passport requires mode 0600 or 0660.\n"
+            : "Passport could not be built: ".get_class($error)."\n");
+        exit(1);
+    }
+'); then
+    echo "::error::Passport cannot load its signing keys, so every token request would fail." >&2
+    exit 1
+fi
+echo "Passport loads the signing key pair."

@@ -357,7 +357,12 @@ candidate `.env` is installed. Values are never printed.
 
 **Persistent Passport and branding files.** Atomic mode refuses a Passport directory not covered by a
 declared persistent path. Passport setup keeps an existing complete signing pair,
-creates keys only when neither file exists, and refuses a half-present pair. A configured branding
+creates keys only when neither file exists, and refuses a half-present pair. It then makes both files
+0600 and requires the application to build Passport's authorization and resource servers. Passport
+refuses a key file other users can read, and an application may load keys from somewhere other than
+the declared directory; either would otherwise fail every token request after activation while `/up`
+and unauthenticated MCP probes still pass. The failure names a fixed reason or the exception class,
+never a host path. A configured branding
 source must be a real directory below `~/.config/`; every named source must be a nonempty regular file.
 Files are copied through same-directory temporary files into `public/branding`, and the private source
 remains outside the guarded application upload.
@@ -535,6 +540,9 @@ bash scripts/test-operational-audit.sh
 bash scripts/test-ensure-passport-keys.sh
 bash scripts/test-install-branding.sh
 ```
+
+`bash scripts/test-real-laravel-passport.sh '^13.0'` proves the Passport check against a real
+skeleton with real Passport, including a refused 0644 key outside the declared directory.
 
 The real Laravel 12/13 harness also runs the orphan recovery integration against its
 temporary managed application, including actual local HTTP application identity,

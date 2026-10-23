@@ -170,6 +170,8 @@ inputs:
     description: >-
       Relative application path holding oauth-private.key and oauth-public.key. Empty skips Passport
       key setup; otherwise a complete pair is kept, neither creates one, and a partial pair fails.
+      Both files are made 0600, then the application must build Passport's authorization and
+      resource servers, so a pair Passport would refuse at the first token request fails here.
     required: false
     default: ''
   branding-source:
