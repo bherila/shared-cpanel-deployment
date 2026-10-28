@@ -198,7 +198,7 @@ for name in INSTALL:
         f.context['inputs.cron-memory-limit'] = 'bad'
         assert f.execute(name).returncode == 0
         args = json.loads((f.root / 'ssh.json').read_text())
-        assert shlex.split(args[-1])[3:] == ['app'] + original
+        assert shlex.split(args[-1]) == ['nohup', 'bash', '-s', '--', 'app'] + original
         (f.root / 'ssh.json').unlink()
         artifact.write_text(artifact.read_text() + 'tampered\n')
         assert f.execute(name).returncode == 2
