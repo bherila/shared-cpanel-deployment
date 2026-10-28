@@ -87,10 +87,10 @@ check "a desired line running from another directory is refused" '[ "$elsewhere"
 check "an application directory that is not a plain name is refused" '[ "$traversal" -eq 2 ]'
 check "refusals leave the crontab untouched" '[ "$(cat "$CRONTAB_FILE")" = "keep me" ]'
 
-# 6. Quoting survives the hop the workflow uses (printf %q, then bash -s).
+# 6. Quoting survives the hop the workflow uses (printf %q, then nohup bash -s).
 setup
 quoted=$(printf '%q ' app "$SCHED")
-bash -c "bash -s -- $quoted" <"$script" >/dev/null
+bash -c "nohup bash -s -- $quoted" <"$script" >/dev/null
 check "lines passed through printf %q and bash -s arrive intact" '[ "$(cat "$CRONTAB_FILE")" = "$SCHED" ]'
 
 echo "failures: $fails"
