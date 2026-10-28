@@ -4,7 +4,7 @@
 #
 # Runs ON THE HOST, fed over SSH by the deploy workflow:
 #
-#   ssh <target> "bash -s -- $(printf '%q ' <app-dir> <line>...)" < scripts/deploy/install-cron.sh
+#   ssh <target> "nohup bash -s -- $(printf '%q ' <app-dir> <line>...)" < scripts/deploy/install-cron.sh
 #
 #   <app-dir>  The application's directory under $HOME.
 #   <line>...  The desired lines. Each runs from `cd "$HOME/<app-dir>" ` and ends in `# JOB:<id>`.

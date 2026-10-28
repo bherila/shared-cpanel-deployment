@@ -47,7 +47,7 @@ done <<<"${DEPLOY_EXCLUDES:-}"
 # The remote transaction, not a caller-controlled destination, creates and owns
 # this exact directory. Refuse upload if its lock or state is not present.
 # shellcheck disable=SC2016,SC2029
-state=$(ssh "$target" "bash -s -- $(printf '%q ' "$app" "$release")" <<'REMOTE'
+state=$(ssh "$target" "nohup bash -s -- $(printf '%q ' "$app" "$release")" <<'REMOTE'
 app=$1
 release=$2
 root="$HOME/.deployments/$app"

@@ -4,7 +4,7 @@
 #
 # Runs ON THE HOST, fed over SSH by the remote-artisan action:
 #
-#   ssh <target> "bash -s -- $(printf '%q ' <app-dir> <php> <memory-limit> <command>...)" < scripts/remote-artisan.sh
+#   ssh <target> "nohup bash -s -- $(printf '%q ' <app-dir> <php> <memory-limit> <command>...)" < scripts/remote-artisan.sh
 #
 #   <app-dir>    The application's directory under $HOME.
 #   <php>        The PHP CLI binary. cPanel's default `php` is often older than the site's handler.

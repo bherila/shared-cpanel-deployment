@@ -4,7 +4,7 @@
 #
 # Runs ON THE HOST, piped over SSH:
 #
-#   ssh <target> "bash -s -- <host[:port]> <path> <max-seconds> [expected-text] [response-kind]" <origin-fetch.sh
+#   ssh <target> "nohup bash -s -- <host[:port]> <path> <max-seconds> [expected-text] [response-kind]" <origin-fetch.sh
 #
 # Deploy checks used to fetch through the public URL from the runner. A zone rule that challenges
 # visitors by country (Cloudflare "I'm Under Attack" for non-US traffic) answered those requests

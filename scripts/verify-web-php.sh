@@ -136,7 +136,7 @@ for (( attempt = 1; attempt <= attempts; attempt++ )); do
     fi
     # shellcheck disable=SC2029
     if (ulimit -f 512; timeout --signal=KILL "${request_limit}s" ssh ${ssh_options[@]+"${ssh_options[@]}"} "$target" \
-        "bash -s -- $(printf '%q ' "$site_host" "$site_path/$name" "$request_limit" '' php-runtime)") \
+        "nohup bash -s -- $(printf '%q ' "$site_host" "$site_path/$name" "$request_limit" '' php-runtime)") \
         <"$here/origin-fetch.sh" >"$raw_file" 2>/dev/null \
         && [[ $(wc -c <"$raw_file") -le 263168 ]] \
         && tail -c 1 "$raw_file" | od -An -tu1 | grep -Eq '^[[:space:]]*10[[:space:]]*$' \

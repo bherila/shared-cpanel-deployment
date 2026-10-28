@@ -249,6 +249,12 @@ The runner verification environment includes `DEPLOY_SSH_TARGET`, `DEPLOY_PHP_BI
 or start a scheduler or worker; the action re-proves maintenance when the hook returns. Express managed
 scheduled work with `cron-lines` and `extra-cron-lines`, which are installed only after serving is proven.
 
+Every remote step, including each hook, runs in a shell started as `nohup bash -s`. SIGHUP is
+therefore ignored by the shell and inherited by Artisan and anything a hook starts. A hangup
+signal sent on the host cannot kill a migration or an import midway and strand the site in
+maintenance. A hook that needs a hangup handler cannot install one, because bash cannot trap a
+signal that was ignored on entry. Orphan recovery is the exception; it still runs without `nohup`.
+
 An existing app must provide `quiesce-script` by default. The five initial consumers use it to wait for
 workers or assert that no app-owned PHP process remains. Set `allow-unverified-quiescence:true` only
 when the application contract proves it never owns a scheduler, queue worker, or other long-running

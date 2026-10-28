@@ -15,7 +15,7 @@ generation() {
     local limit=$time_left
     [ "$limit" -le 60 ] || limit=60
     timeout --signal=TERM --kill-after=2s "${limit}s" ssh "$DEPLOY_SSH_TARGET" \
-        "bash -s -- $(printf '%q ' "$DEPLOY_DIR" "$DEPLOY_PHP_BINARY" "$MEMORY_LIMIT" "$DEPLOY_RELEASE_ID" "$DEPLOY_SOURCE_COMMIT" "$PERSISTENT_PATHS" "$1")" \
+        "nohup bash -s -- $(printf '%q ' "$DEPLOY_DIR" "$DEPLOY_PHP_BINARY" "$MEMORY_LIMIT" "$DEPLOY_RELEASE_ID" "$DEPLOY_SOURCE_COMMIT" "$PERSISTENT_PATHS" "$1")" \
         <"$GITHUB_ACTION_PATH/scripts/operational-audit.sh"
 }
 superseded() {

@@ -574,7 +574,7 @@ runs:
           [ -z "${assertion//[[:space:]]/}" ] && continue
           ops+=("ASSERT:$assertion")
         done <<<"$ENV_ASSERTIONS"
-        ssh "$TARGET" "bash -s -- $(printf '%q ' "$DEPLOY_DIR" "$ENV_SOURCE" ${ops[@]+"${ops[@]}"})" \
+        ssh "$TARGET" "nohup bash -s -- $(printf '%q ' "$DEPLOY_DIR" "$ENV_SOURCE" ${ops[@]+"${ops[@]}"})" \
           <"$GITHUB_ACTION_PATH/scripts/configure-env.sh"
 
     - name: Ensure Passport signing keys before application upload
@@ -588,7 +588,7 @@ runs:
         ARTISAN_MEMORY_LIMIT: ${{ inputs.artisan-memory-limit }}
       run: |
         set -euo pipefail
-        ssh "$TARGET" "bash -s -- $(printf '%q ' "$DEPLOY_DIR" "$PHP_BINARY" "$KEY_DIRECTORY" '' "$ARTISAN_MEMORY_LIMIT")" \
+        ssh "$TARGET" "nohup bash -s -- $(printf '%q ' "$DEPLOY_DIR" "$PHP_BINARY" "$KEY_DIRECTORY" '' "$ARTISAN_MEMORY_LIMIT")" \
           <"$GITHUB_ACTION_PATH/scripts/ensure-passport-keys.sh"
 
     - name: Run the pre-migrate script against the previous release
@@ -602,7 +602,7 @@ runs:
       run: |
         set -euo pipefail
         [ -f "$SCRIPT" ] || { echo "::error::pre-migrate-script '$SCRIPT' does not exist in the checkout." >&2; exit 2; }
-        ssh "$TARGET" "bash -s -- $(printf '%q ' "$DEPLOY_DIR" "$PHP_BINARY")" <"$SCRIPT"
+        ssh "$TARGET" "nohup bash -s -- $(printf '%q ' "$DEPLOY_DIR" "$PHP_BINARY")" <"$SCRIPT"
 
     - name: Migrate before application code
       if: inputs.deployment-mode == 'in-place' && inputs.migration-order == 'before-upload'
@@ -614,7 +614,7 @@ runs:
         ARTISAN_MEMORY_LIMIT: ${{ inputs.artisan-memory-limit }}
       run: |
         set -euo pipefail
-        ssh "$TARGET" "bash -s -- $(printf '%q ' "$DEPLOY_DIR" "$PHP_BINARY" "$ARTISAN_MEMORY_LIMIT" 'config:clear' 'migrate --force')" \
+        ssh "$TARGET" "nohup bash -s -- $(printf '%q ' "$DEPLOY_DIR" "$PHP_BINARY" "$ARTISAN_MEMORY_LIMIT" 'config:clear' 'migrate --force')" \
           <"$GITHUB_ACTION_PATH/scripts/remote-artisan.sh"
 
     - name: Verify migrations completed before application upload
@@ -627,7 +627,7 @@ runs:
         ARTISAN_MEMORY_LIMIT: ${{ inputs.artisan-memory-limit }}
       run: |
         set -euo pipefail
-        ssh "$TARGET" "bash -s -- $(printf '%q ' "$DEPLOY_DIR" "$PHP_BINARY" "$ARTISAN_MEMORY_LIMIT")" \
+        ssh "$TARGET" "nohup bash -s -- $(printf '%q ' "$DEPLOY_DIR" "$PHP_BINARY" "$ARTISAN_MEMORY_LIMIT")" \
           <"$GITHUB_ACTION_PATH/scripts/assert-no-pending-migrations.sh"
 
     - name: Finalize an explicitly selected interrupted transaction
@@ -641,7 +641,7 @@ runs:
         ARTISAN_MEMORY_LIMIT: ${{ inputs.artisan-memory-limit }}
       run: |
         set -euo pipefail
-        output=$(ssh "$TARGET" "bash -s -- $(printf '%q ' finalize "$DEPLOY_DIR" "$RECOVERY_RELEASE_ID" "$PHP_BINARY" "$ARTISAN_MEMORY_LIMIT")" \
+        output=$(ssh "$TARGET" "nohup bash -s -- $(printf '%q ' finalize "$DEPLOY_DIR" "$RECOVERY_RELEASE_ID" "$PHP_BINARY" "$ARTISAN_MEMORY_LIMIT")" \
           <"$GITHUB_ACTION_PATH/scripts/atomic-release.sh")
         printf '%s\n' "$output"
         state=$(sed -n 's/^live_state=//p' <<<"$output" | tail -1)
@@ -674,7 +674,7 @@ runs:
           [ -n "$path" ] && paths+=("$path")
         done <<<"$PERSISTENT_PATHS"
         [ "${#paths[@]}" -gt 0 ] || { echo "::error::persistent-paths must name at least one path." >&2; exit 2; }
-        ssh "$TARGET" "bash -s -- $(printf '%q ' begin "$DEPLOY_DIR" "$RELEASE_ID" "$SOURCE_COMMIT" "$LOCK_TIMEOUT" "$RETAIN_RELEASES" "$FAILURE_POLICY" "$INITIAL_LIVE_COMMIT" "$ATOMIC_LAYOUT" "${paths[@]}")" \
+        ssh "$TARGET" "nohup bash -s -- $(printf '%q ' begin "$DEPLOY_DIR" "$RELEASE_ID" "$SOURCE_COMMIT" "$LOCK_TIMEOUT" "$RETAIN_RELEASES" "$FAILURE_POLICY" "$INITIAL_LIVE_COMMIT" "$ATOMIC_LAYOUT" "${paths[@]}")" \
           <"$GITHUB_ACTION_PATH/scripts/atomic-release.sh"
 
     - name: Verify remote capacity before atomic upload
@@ -695,7 +695,7 @@ runs:
         [ "${#paths[@]}" -gt 0 ] || { echo "::error::paths must name at least one upload path." >&2; exit 2; }
         required_kib=$(du -sk -- "${paths[@]}" | awk '{ total += $1 } END { print total + 0 }')
         [ "$required_kib" -gt 0 ] || required_kib=1
-        ssh "$TARGET" "bash -s -- $(printf '%q ' capacity "$DEPLOY_DIR" "$RELEASE_ID" "$required_kib")" \
+        ssh "$TARGET" "nohup bash -s -- $(printf '%q ' capacity "$DEPLOY_DIR" "$RELEASE_ID" "$required_kib")" \
           <"$GITHUB_ACTION_PATH/scripts/atomic-release.sh"
 
     - name: Upload the atomic candidate
@@ -722,7 +722,7 @@ runs:
         ALLOW_UNVERIFIED_QUIESCENCE: ${{ inputs.allow-unverified-quiescence }}
       run: |
         set -euo pipefail
-        output=$(ssh "$TARGET" "bash -s -- $(printf '%q ' preflight "$DEPLOY_DIR" "$RELEASE_ID" "$WEBROOT_LINK")" \
+        output=$(ssh "$TARGET" "nohup bash -s -- $(printf '%q ' preflight "$DEPLOY_DIR" "$RELEASE_ID" "$WEBROOT_LINK")" \
           <"$GITHUB_ACTION_PATH/scripts/atomic-release.sh")
         printf '%s\n' "$output"
         conversion=$(sed -n 's/^conversion_required=//p' <<<"$output" | tail -1)
@@ -744,7 +744,7 @@ runs:
         MEMORY_LIMIT: ${{ inputs.artisan-memory-limit }}
       run: |
         set -euo pipefail
-        timeout --kill-after=5s 60s ssh -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=2 "$TARGET" "bash -s -- $(printf '%q ' "$APP_DIR" "$PHP_BINARY" "$MEMORY_LIMIT")" <"$GITHUB_ACTION_PATH/scripts/operational-audit.sh"
+        timeout --kill-after=5s 60s ssh -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=2 "$TARGET" "nohup bash -s -- $(printf '%q ' "$APP_DIR" "$PHP_BINARY" "$MEMORY_LIMIT")" <"$GITHUB_ACTION_PATH/scripts/operational-audit.sh"
 
     - name: Check application prerequisites before atomic mutation
       if: inputs.deployment-mode == 'atomic' && inputs.preflight-script != ''
@@ -768,7 +768,7 @@ runs:
         ARTISAN_MEMORY_LIMIT: ${{ inputs.artisan-memory-limit }}
       run: |
         set -euo pipefail
-        ssh "$TARGET" "bash -s -- $(printf '%q ' quiesce "$DEPLOY_DIR" "$RELEASE_ID" "$PHP_BINARY" "$ARTISAN_MEMORY_LIMIT")" \
+        ssh "$TARGET" "nohup bash -s -- $(printf '%q ' quiesce "$DEPLOY_DIR" "$RELEASE_ID" "$PHP_BINARY" "$ARTISAN_MEMORY_LIMIT")" \
           <"$GITHUB_ACTION_PATH/scripts/atomic-release.sh"
 
     - name: Drain processes before persistent conversion
@@ -783,7 +783,7 @@ runs:
       run: |
         set -euo pipefail
         [ -f "$SCRIPT" ] || { echo "::error::quiesce-script '$SCRIPT' does not exist in the checkout." >&2; exit 2; }
-        ssh "$TARGET" "bash -s -- $(printf '%q ' "$CANDIDATE_DIR" "$PHP_BINARY" "$STABLE_DIR")" <"$SCRIPT"
+        ssh "$TARGET" "nohup bash -s -- $(printf '%q ' "$CANDIDATE_DIR" "$PHP_BINARY" "$STABLE_DIR")" <"$SCRIPT"
 
     - name: Prepare shared runtime paths and the atomic candidate
       if: inputs.deployment-mode == 'atomic'
@@ -796,7 +796,7 @@ runs:
         ARTISAN_MEMORY_LIMIT: ${{ inputs.artisan-memory-limit }}
       run: |
         set -euo pipefail
-        ssh "$TARGET" "bash -s -- $(printf '%q ' prepare "$DEPLOY_DIR" "$RELEASE_ID" "$PHP_BINARY" "$ARTISAN_MEMORY_LIMIT")" \
+        ssh "$TARGET" "nohup bash -s -- $(printf '%q ' prepare "$DEPLOY_DIR" "$RELEASE_ID" "$PHP_BINARY" "$ARTISAN_MEMORY_LIMIT")" \
           <"$GITHUB_ACTION_PATH/scripts/atomic-release.sh"
 
     - name: Upload with guarded in-place rsync
@@ -819,7 +819,7 @@ runs:
         LINK_NAME: ${{ inputs.webroot-symlink }}
       run: |
         set -euo pipefail
-        ssh "$TARGET" "bash -s -- $(printf '%q ' "$DEPLOY_DIR" "$LINK_NAME")" \
+        ssh "$TARGET" "nohup bash -s -- $(printf '%q ' "$DEPLOY_DIR" "$LINK_NAME")" \
           <"$GITHUB_ACTION_PATH/scripts/ensure-webroot-symlink.sh"
 
     - name: Install and check .env
@@ -858,7 +858,7 @@ runs:
           [ -z "${assertion//[[:space:]]/}" ] && continue
           ops+=("ASSERT:$assertion")
         done <<<"$ENV_ASSERTIONS"
-        ssh "$TARGET" "bash -s -- $(printf '%q ' "$DEPLOY_DIR" "$ENV_SOURCE" ${ops[@]+"${ops[@]}"})" \
+        ssh "$TARGET" "nohup bash -s -- $(printf '%q ' "$DEPLOY_DIR" "$ENV_SOURCE" ${ops[@]+"${ops[@]}"})" \
           <"$GITHUB_ACTION_PATH/scripts/configure-env.sh"
 
     - name: Ensure Passport signing keys
@@ -873,7 +873,7 @@ runs:
         ARTISAN_MEMORY_LIMIT: ${{ inputs.artisan-memory-limit }}
       run: |
         set -euo pipefail
-        ssh "$TARGET" "bash -s -- $(printf '%q ' "$DEPLOY_DIR" "$PHP_BINARY" "$KEY_DIRECTORY" "$SHARED_ROOT" "$ARTISAN_MEMORY_LIMIT")" \
+        ssh "$TARGET" "nohup bash -s -- $(printf '%q ' "$DEPLOY_DIR" "$PHP_BINARY" "$KEY_DIRECTORY" "$SHARED_ROOT" "$ARTISAN_MEMORY_LIMIT")" \
           <"$GITHUB_ACTION_PATH/scripts/ensure-passport-keys.sh"
 
     - name: Install private branding
@@ -893,7 +893,7 @@ runs:
           [ -n "$file" ] && files+=("$file")
         done <<<"$BRANDING_FILES"
         [ "${#files[@]}" -gt 0 ] || { echo "::error::branding-files must name at least one file." >&2; exit 2; }
-        ssh "$TARGET" "bash -s -- $(printf '%q ' "$DEPLOY_DIR" "$BRANDING_SOURCE" "${files[@]}")" \
+        ssh "$TARGET" "nohup bash -s -- $(printf '%q ' "$DEPLOY_DIR" "$BRANDING_SOURCE" "${files[@]}")" \
           <"$GITHUB_ACTION_PATH/scripts/install-branding.sh"
 
     - name: Quiesce an already-versioned atomic deployment
@@ -907,7 +907,7 @@ runs:
         ARTISAN_MEMORY_LIMIT: ${{ inputs.artisan-memory-limit }}
       run: |
         set -euo pipefail
-        ssh "$TARGET" "bash -s -- $(printf '%q ' quiesce "$DEPLOY_DIR" "$RELEASE_ID" "$PHP_BINARY" "$ARTISAN_MEMORY_LIMIT")" \
+        ssh "$TARGET" "nohup bash -s -- $(printf '%q ' quiesce "$DEPLOY_DIR" "$RELEASE_ID" "$PHP_BINARY" "$ARTISAN_MEMORY_LIMIT")" \
           <"$GITHUB_ACTION_PATH/scripts/atomic-release.sh"
 
     - name: Drain processes before the atomic risk boundary
@@ -922,7 +922,7 @@ runs:
       run: |
         set -euo pipefail
         [ -f "$SCRIPT" ] || { echo "::error::quiesce-script '$SCRIPT' does not exist in the checkout." >&2; exit 2; }
-        ssh "$TARGET" "bash -s -- $(printf '%q ' "$CANDIDATE_DIR" "$PHP_BINARY" "$STABLE_DIR")" <"$SCRIPT"
+        ssh "$TARGET" "nohup bash -s -- $(printf '%q ' "$CANDIDATE_DIR" "$PHP_BINARY" "$STABLE_DIR")" <"$SCRIPT"
 
     - name: Enter the atomic database-risk boundary
       if: inputs.deployment-mode == 'atomic'
@@ -935,7 +935,7 @@ runs:
         ARTISAN_MEMORY_LIMIT: ${{ inputs.artisan-memory-limit }}
       run: |
         set -euo pipefail
-        ssh "$TARGET" "bash -s -- $(printf '%q ' risk "$DEPLOY_DIR" "$RELEASE_ID" "$PHP_BINARY" "$ARTISAN_MEMORY_LIMIT")" \
+        ssh "$TARGET" "nohup bash -s -- $(printf '%q ' risk "$DEPLOY_DIR" "$RELEASE_ID" "$PHP_BINARY" "$ARTISAN_MEMORY_LIMIT")" \
           <"$GITHUB_ACTION_PATH/scripts/atomic-release.sh"
 
     - name: Run the pre-migrate script
@@ -952,9 +952,9 @@ runs:
         set -euo pipefail
         [ -f "$SCRIPT" ] || { echo "::error::pre-migrate-script '$SCRIPT' does not exist in the checkout." >&2; exit 2; }
         if [ "$DEPLOYMENT_MODE" = atomic ]; then
-          ssh "$TARGET" "bash -s -- $(printf '%q ' "$DEPLOY_DIR" "$PHP_BINARY" "$STABLE_DIR")" <"$SCRIPT"
+          ssh "$TARGET" "nohup bash -s -- $(printf '%q ' "$DEPLOY_DIR" "$PHP_BINARY" "$STABLE_DIR")" <"$SCRIPT"
         else
-          ssh "$TARGET" "bash -s -- $(printf '%q ' "$DEPLOY_DIR" "$PHP_BINARY")" <"$SCRIPT"
+          ssh "$TARGET" "nohup bash -s -- $(printf '%q ' "$DEPLOY_DIR" "$PHP_BINARY")" <"$SCRIPT"
         fi
 
     - name: Clear config and migrate
@@ -972,7 +972,7 @@ runs:
         if [ "$RUN_MIGRATIONS" = true ] && [ "$MIGRATION_ORDER" = after-upload ]; then
           commands+=("migrate --force")
         fi
-        ssh "$TARGET" "bash -s -- $(printf '%q ' "$DEPLOY_DIR" "$PHP_BINARY" "$ARTISAN_MEMORY_LIMIT" "${commands[@]}")" \
+        ssh "$TARGET" "nohup bash -s -- $(printf '%q ' "$DEPLOY_DIR" "$PHP_BINARY" "$ARTISAN_MEMORY_LIMIT" "${commands[@]}")" \
           <"$GITHUB_ACTION_PATH/scripts/remote-artisan.sh"
 
     - name: Verify migrations completed
@@ -985,7 +985,7 @@ runs:
         ARTISAN_MEMORY_LIMIT: ${{ inputs.artisan-memory-limit }}
       run: |
         set -euo pipefail
-        ssh "$TARGET" "bash -s -- $(printf '%q ' "$DEPLOY_DIR" "$PHP_BINARY" "$ARTISAN_MEMORY_LIMIT")" \
+        ssh "$TARGET" "nohup bash -s -- $(printf '%q ' "$DEPLOY_DIR" "$PHP_BINARY" "$ARTISAN_MEMORY_LIMIT")" \
           <"$GITHUB_ACTION_PATH/scripts/assert-no-pending-migrations.sh"
 
     - name: Cache config and run extra Artisan commands
@@ -1004,7 +1004,7 @@ runs:
           [ -z "${line//[[:space:]]/}" ] && continue
           commands+=("$line")
         done <<<"$EXTRA_COMMANDS"
-        ssh "$TARGET" "bash -s -- $(printf '%q ' "$DEPLOY_DIR" "$PHP_BINARY" "$ARTISAN_MEMORY_LIMIT" "${commands[@]}")" \
+        ssh "$TARGET" "nohup bash -s -- $(printf '%q ' "$DEPLOY_DIR" "$PHP_BINARY" "$ARTISAN_MEMORY_LIMIT" "${commands[@]}")" \
           <"$GITHUB_ACTION_PATH/scripts/remote-artisan.sh"
 
     - name: Verify Passport loads the signing keys from the uploaded application
@@ -1023,7 +1023,7 @@ runs:
         ARTISAN_MEMORY_LIMIT: ${{ inputs.artisan-memory-limit }}
       run: |
         set -euo pipefail
-        ssh "$TARGET" "bash -s -- $(printf '%q ' "$DEPLOY_DIR" "$PHP_BINARY" "$KEY_DIRECTORY" "$SHARED_ROOT" "$ARTISAN_MEMORY_LIMIT" verify)" \
+        ssh "$TARGET" "nohup bash -s -- $(printf '%q ' "$DEPLOY_DIR" "$PHP_BINARY" "$KEY_DIRECTORY" "$SHARED_ROOT" "$ARTISAN_MEMORY_LIMIT" verify)" \
           <"$GITHUB_ACTION_PATH/scripts/ensure-passport-keys.sh"
 
     - name: Install this application's cron lines
@@ -1042,7 +1042,7 @@ runs:
         # whose bytes could change between checksum and read.
         digest=$(printf '%s\n' "${lines[@]}" | sha256sum); digest=${digest%% *}
         [ "$digest" = "$CRON_SHA256" ] || { echo '::error::Validated cron artifact changed after preflight.' >&2; exit 2; }
-        ssh "$TARGET" "bash -s -- $(printf '%q ' "$DEPLOY_DIR" "${lines[@]}")" \
+        ssh "$TARGET" "nohup bash -s -- $(printf '%q ' "$DEPLOY_DIR" "${lines[@]}")" \
           <"$GITHUB_ACTION_PATH/scripts/install-cron.sh"
 
     - name: Run the post-deploy script
@@ -1059,9 +1059,9 @@ runs:
         set -euo pipefail
         [ -f "$SCRIPT" ] || { echo "::error::post-deploy-script '$SCRIPT' does not exist in the checkout." >&2; exit 2; }
         if [ "$DEPLOYMENT_MODE" = atomic ]; then
-          ssh "$TARGET" "bash -s -- $(printf '%q ' "$DEPLOY_DIR" "$PHP_BINARY" "$STABLE_DIR")" <"$SCRIPT"
+          ssh "$TARGET" "nohup bash -s -- $(printf '%q ' "$DEPLOY_DIR" "$PHP_BINARY" "$STABLE_DIR")" <"$SCRIPT"
         else
-          ssh "$TARGET" "bash -s -- $(printf '%q ' "$DEPLOY_DIR" "$PHP_BINARY")" <"$SCRIPT"
+          ssh "$TARGET" "nohup bash -s -- $(printf '%q ' "$DEPLOY_DIR" "$PHP_BINARY")" <"$SCRIPT"
         fi
 
     - name: Run atomic pre-activation checks
@@ -1075,7 +1075,7 @@ runs:
       run: |
         set -euo pipefail
         [ -f "$SCRIPT" ] || { echo "::error::pre-activate-script '$SCRIPT' does not exist in the checkout." >&2; exit 2; }
-        ssh "$TARGET" "bash -s -- $(printf '%q ' "$CANDIDATE_DIR" "$PHP_BINARY" '${{ inputs.deploy-dir }}')" <"$SCRIPT"
+        ssh "$TARGET" "nohup bash -s -- $(printf '%q ' "$CANDIDATE_DIR" "$PHP_BINARY" '${{ inputs.deploy-dir }}')" <"$SCRIPT"
 
     - name: Audit candidate operational state
       if: inputs.deployment-mode == 'atomic' && inputs.operational-audit == 'true'
@@ -1087,7 +1087,7 @@ runs:
         MEMORY_LIMIT: ${{ inputs.artisan-memory-limit }}
       run: |
         set -euo pipefail
-        timeout --kill-after=5s 60s ssh -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=2 "$TARGET" "bash -s -- $(printf '%q ' "$APP_DIR" "$PHP_BINARY" "$MEMORY_LIMIT")" <"$GITHUB_ACTION_PATH/scripts/operational-audit.sh"
+        timeout --kill-after=5s 60s ssh -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=2 "$TARGET" "nohup bash -s -- $(printf '%q ' "$APP_DIR" "$PHP_BINARY" "$MEMORY_LIMIT")" <"$GITHUB_ACTION_PATH/scripts/operational-audit.sh"
 
     - name: Atomically select the candidate
       if: inputs.deployment-mode == 'atomic'
@@ -1100,7 +1100,7 @@ runs:
         ARTISAN_MEMORY_LIMIT: ${{ inputs.artisan-memory-limit }}
       run: |
         set -euo pipefail
-        ssh "$TARGET" "bash -s -- $(printf '%q ' activate "$DEPLOY_DIR" "$RELEASE_ID" "$PHP_BINARY" "$ARTISAN_MEMORY_LIMIT")" \
+        ssh "$TARGET" "nohup bash -s -- $(printf '%q ' activate "$DEPLOY_DIR" "$RELEASE_ID" "$PHP_BINARY" "$ARTISAN_MEMORY_LIMIT")" \
           <"$GITHUB_ACTION_PATH/scripts/atomic-release.sh"
 
     - name: Rebuild caches from the stable atomic path
@@ -1120,7 +1120,7 @@ runs:
           [ -z "${line//[[:space:]]/}" ] && continue
           commands+=("$line")
         done <<<"$EXTRA_COMMANDS"
-        ssh "$TARGET" "bash -s -- $(printf '%q ' refresh-caches "$DEPLOY_DIR" "$RELEASE_ID" "$PHP_BINARY" "$ARTISAN_MEMORY_LIMIT" "${commands[@]}")" \
+        ssh "$TARGET" "nohup bash -s -- $(printf '%q ' refresh-caches "$DEPLOY_DIR" "$RELEASE_ID" "$PHP_BINARY" "$ARTISAN_MEMORY_LIMIT" "${commands[@]}")" \
           <"$GITHUB_ACTION_PATH/scripts/atomic-release.sh"
 
     - name: Ensure the atomic deployment's stable webroot symlink
@@ -1132,7 +1132,7 @@ runs:
         LINK_NAME: ${{ inputs.webroot-symlink }}
       run: |
         set -euo pipefail
-        ssh "$TARGET" "bash -s -- $(printf '%q ' "$DEPLOY_DIR" "$LINK_NAME")" \
+        ssh "$TARGET" "nohup bash -s -- $(printf '%q ' "$DEPLOY_DIR" "$LINK_NAME")" \
           <"$GITHUB_ACTION_PATH/scripts/ensure-webroot-symlink.sh"
 
     - name: Run the atomic post-activation script
@@ -1147,7 +1147,7 @@ runs:
       run: |
         set -euo pipefail
         [ -f "$SCRIPT" ] || { echo "::error::post-activate-script '$SCRIPT' does not exist in the checkout." >&2; exit 2; }
-        ssh "$TARGET" "bash -s -- $(printf '%q ' "$DEPLOY_DIR" "$PHP_BINARY" "$ACTIVE_CANDIDATE_DIR")" <"$SCRIPT"
+        ssh "$TARGET" "nohup bash -s -- $(printf '%q ' "$DEPLOY_DIR" "$PHP_BINARY" "$ACTIVE_CANDIDATE_DIR")" <"$SCRIPT"
 
     - name: Audit selected operational state before serving
       if: inputs.deployment-mode == 'atomic' && inputs.operational-audit == 'true'
@@ -1159,7 +1159,7 @@ runs:
         MEMORY_LIMIT: ${{ inputs.artisan-memory-limit }}
       run: |
         set -euo pipefail
-        timeout --kill-after=5s 60s ssh -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=2 "$TARGET" "bash -s -- $(printf '%q ' "$APP_DIR" "$PHP_BINARY" "$MEMORY_LIMIT")" <"$GITHUB_ACTION_PATH/scripts/operational-audit.sh"
+        timeout --kill-after=5s 60s ssh -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=2 "$TARGET" "nohup bash -s -- $(printf '%q ' "$APP_DIR" "$PHP_BINARY" "$MEMORY_LIMIT")" <"$GITHUB_ACTION_PATH/scripts/operational-audit.sh"
 
     - name: Audit canonical selected runtime paths
       if: inputs.deployment-mode == 'atomic' && inputs.runtime-audit == 'true'
@@ -1174,7 +1174,7 @@ runs:
         PERSISTENT_PATHS: ${{ inputs.persistent-paths }}
       run: |
         set -euo pipefail
-        timeout --kill-after=5s 60s ssh -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=2 "$TARGET" "bash -s -- $(printf '%q ' "$APP_DIR" "$PHP_BINARY" "$MEMORY_LIMIT" "$RELEASE_ID" "$SOURCE_COMMIT" "$PERSISTENT_PATHS" selected)" <"$GITHUB_ACTION_PATH/scripts/operational-audit.sh"
+        timeout --kill-after=5s 60s ssh -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=2 "$TARGET" "nohup bash -s -- $(printf '%q ' "$APP_DIR" "$PHP_BINARY" "$MEMORY_LIMIT" "$RELEASE_ID" "$SOURCE_COMMIT" "$PERSISTENT_PATHS" selected)" <"$GITHUB_ACTION_PATH/scripts/operational-audit.sh"
 
     - name: Bring the selected atomic release online
       if: inputs.deployment-mode == 'atomic'
@@ -1187,7 +1187,7 @@ runs:
         ARTISAN_MEMORY_LIMIT: ${{ inputs.artisan-memory-limit }}
       run: |
         set -euo pipefail
-        ssh "$TARGET" "bash -s -- $(printf '%q ' serve "$DEPLOY_DIR" "$RELEASE_ID" "$PHP_BINARY" "$ARTISAN_MEMORY_LIMIT")" \
+        ssh "$TARGET" "nohup bash -s -- $(printf '%q ' serve "$DEPLOY_DIR" "$RELEASE_ID" "$PHP_BINARY" "$ARTISAN_MEMORY_LIMIT")" \
           <"$GITHUB_ACTION_PATH/scripts/atomic-release.sh"
 
     - name: Install the atomic deployment's cron lines
@@ -1206,7 +1206,7 @@ runs:
         # whose bytes could change between checksum and read.
         digest=$(printf '%s\n' "${lines[@]}" | sha256sum); digest=${digest%% *}
         [ "$digest" = "$CRON_SHA256" ] || { echo '::error::Validated cron artifact changed after preflight.' >&2; exit 2; }
-        ssh "$TARGET" "bash -s -- $(printf '%q ' "$DEPLOY_DIR" "${lines[@]}")" \
+        ssh "$TARGET" "nohup bash -s -- $(printf '%q ' "$DEPLOY_DIR" "${lines[@]}")" \
           <"$GITHUB_ACTION_PATH/scripts/install-cron.sh"
 
     - name: Restore unmanaged atomic cron lines
@@ -1218,7 +1218,7 @@ runs:
         RELEASE_ID: ${{ steps.resolve.outputs.release-id }}
       run: |
         set -euo pipefail
-        ssh "$TARGET" "bash -s -- $(printf '%q ' restore-cron "$DEPLOY_DIR" "$RELEASE_ID")" \
+        ssh "$TARGET" "nohup bash -s -- $(printf '%q ' restore-cron "$DEPLOY_DIR" "$RELEASE_ID")" \
           <"$GITHUB_ACTION_PATH/scripts/atomic-release.sh"
 
     - id: site-health
@@ -1252,7 +1252,7 @@ runs:
         for attempt in 1 2 3 4; do
           status=unreachable
           found=no
-          if (ulimit -f 512; timeout --signal=KILL 20s ssh "$TARGET" "bash -s -- $(printf '%q ' "$host" "$base$HEALTH_PATH" 20 "$HEALTH_EXPECT")") \
+          if (ulimit -f 512; timeout --signal=KILL 20s ssh "$TARGET" "nohup bash -s -- $(printf '%q ' "$host" "$base$HEALTH_PATH" 20 "$HEALTH_EXPECT")") \
               <"$GITHUB_ACTION_PATH/scripts/origin-fetch.sh" >"$raw" 2>/dev/null \
               && [[ $(wc -c <"$raw") -le 263168 ]] \
               && tail -c 1 "$raw" | od -An -tu1 | grep -Eq '^[[:space:]]*10[[:space:]]*$' \
@@ -1287,7 +1287,7 @@ runs:
         ARTISAN_MEMORY_LIMIT: ${{ inputs.artisan-memory-limit }}
       run: |
         set -euo pipefail
-        output=$(ssh "$TARGET" "bash -s -- $(printf '%q ' status "$DEPLOY_DIR" "$RELEASE_ID" "$PHP_BINARY" "$ARTISAN_MEMORY_LIMIT")" \
+        output=$(ssh "$TARGET" "nohup bash -s -- $(printf '%q ' status "$DEPLOY_DIR" "$RELEASE_ID" "$PHP_BINARY" "$ARTISAN_MEMORY_LIMIT")" \
           <"$GITHUB_ACTION_PATH/scripts/atomic-release.sh")
         printf '%s\n' "$output"
         for key in live_release live_commit live_state; do
@@ -1352,13 +1352,13 @@ runs:
         if [ "$status" -eq 1 ] && [ "$DEPLOYMENT_MODE" = atomic ] \
           && [ -n "$HEALTH_PATH" ] && [ -n "$APPLICATION_VERIFIER" ] \
           && [ "$HEALTH_PROVEN" = success ] && [ "$APPLICATION_PROVEN" = success ]; then
-          ssh "$TARGET" "bash -s -- $(printf '%q ' mark-healthy "$DEPLOY_DIR" "$RELEASE_ID")" \
+          ssh "$TARGET" "nohup bash -s -- $(printf '%q ' mark-healthy "$DEPLOY_DIR" "$RELEASE_ID")" \
             <"$GITHUB_ACTION_PATH/scripts/atomic-release.sh" || exit 1
         fi
         # A definitive mismatch is never marked. Defensive revocation must not
         # turn classification 3 into an eligible inconclusive classification 1.
         if [ "$status" -eq 3 ] && [ "$DEPLOYMENT_MODE" = atomic ]; then
-          ssh "$TARGET" "bash -s -- $(printf '%q ' unmark-healthy "$DEPLOY_DIR" "$RELEASE_ID")" \
+          ssh "$TARGET" "nohup bash -s -- $(printf '%q ' unmark-healthy "$DEPLOY_DIR" "$RELEASE_ID")" \
             <"$GITHUB_ACTION_PATH/scripts/atomic-release.sh" \
             || echo '::error::Could not revoke the healthy marker after a definitive PHP mismatch.' >&2
         fi
@@ -1373,7 +1373,7 @@ runs:
         RELEASE_ID: ${{ steps.resolve.outputs.release-id }}
       run: |
         set -euo pipefail
-        ssh "$TARGET" "bash -s -- $(printf '%q ' mark-healthy "$DEPLOY_DIR" "$RELEASE_ID")" \
+        ssh "$TARGET" "nohup bash -s -- $(printf '%q ' mark-healthy "$DEPLOY_DIR" "$RELEASE_ID")" \
           <"$GITHUB_ACTION_PATH/scripts/atomic-release.sh"
 
     - name: Run application-specific live verification
@@ -1409,7 +1409,7 @@ runs:
         ARTISAN_MEMORY_LIMIT: ${{ inputs.artisan-memory-limit }}
       run: |
         set -euo pipefail
-        ssh "$TARGET" "bash -s -- $(printf '%q ' commit "$DEPLOY_DIR" "$RELEASE_ID" "$PHP_BINARY" "$ARTISAN_MEMORY_LIMIT")" \
+        ssh "$TARGET" "nohup bash -s -- $(printf '%q ' commit "$DEPLOY_DIR" "$RELEASE_ID" "$PHP_BINARY" "$ARTISAN_MEMORY_LIMIT")" \
           <"$GITHUB_ACTION_PATH/scripts/atomic-release.sh"
 
     - id: atomic-finalize
@@ -1425,7 +1425,7 @@ runs:
       run: |
         set -uo pipefail
         status=0
-        output=$(ssh "$TARGET" "bash -s -- $(printf '%q ' finalize "$DEPLOY_DIR" "$RELEASE_ID" "$PHP_BINARY" "$ARTISAN_MEMORY_LIMIT")" \
+        output=$(ssh "$TARGET" "nohup bash -s -- $(printf '%q ' finalize "$DEPLOY_DIR" "$RELEASE_ID" "$PHP_BINARY" "$ARTISAN_MEMORY_LIMIT")" \
           <"$GITHUB_ACTION_PATH/scripts/atomic-release.sh") || status=$?
         printf '%s\n' "$output"
         for key in live_release live_commit live_state; do
@@ -1448,7 +1448,7 @@ runs:
         PERSISTENT_PATHS: ${{ inputs.persistent-paths }}
       run: |
         set -euo pipefail
-        timeout --kill-after=5s 60s ssh -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=2 "$TARGET" "bash -s -- $(printf '%q ' "$APP_DIR" "$PHP_BINARY" "$MEMORY_LIMIT" "$RELEASE_ID" "$SOURCE_COMMIT" "$PERSISTENT_PATHS" finalized)" <"$GITHUB_ACTION_PATH/scripts/operational-audit.sh"
+        timeout --kill-after=5s 60s ssh -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=2 "$TARGET" "nohup bash -s -- $(printf '%q ' "$APP_DIR" "$PHP_BINARY" "$MEMORY_LIMIT" "$RELEASE_ID" "$SOURCE_COMMIT" "$PERSISTENT_PATHS" finalized)" <"$GITHUB_ACTION_PATH/scripts/operational-audit.sh"
 
     - name: Run read-only post-finalizer diagnostics
       if: success() && inputs.deployment-mode == 'atomic' && inputs.post-finalize-script != '' && steps.atomic-finalize.outcome == 'success'

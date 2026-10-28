@@ -37,7 +37,7 @@ if [ ! -d "$migrations" ]; then
 fi
 
 # shellcheck disable=SC2016,SC2029 # The script expands on the host; arguments are quoted on the runner.
-state=$(ssh "$target" "bash -s -- $(printf '%q ' "$dir")" <<'REMOTE'
+state=$(ssh "$target" "nohup bash -s -- $(printf '%q ' "$dir")" <<'REMOTE'
 app="$HOME/$1"
 if [ -L "$app" ]; then echo symlink
 elif [ ! -d "$app" ]; then echo absent

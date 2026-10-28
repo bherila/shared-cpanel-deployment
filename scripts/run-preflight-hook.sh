@@ -14,4 +14,4 @@ set -euo pipefail
 }
 # Arguments intentionally expand on the runner and are escaped for remote Bash.
 # shellcheck disable=SC2029
-ssh "$TARGET" "bash -s -- $(printf '%q ' "$CANDIDATE_DIR" "$PHP_BINARY" "$STABLE_DIR")" <"$SCRIPT"
+ssh "$TARGET" "nohup bash -s -- $(printf '%q ' "$CANDIDATE_DIR" "$PHP_BINARY" "$STABLE_DIR")" <"$SCRIPT"
