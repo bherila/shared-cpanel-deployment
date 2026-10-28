@@ -509,7 +509,7 @@ audit_success=false
 for ((audit_attempt=0; audit_attempt<2; audit_attempt++)); do
     audit_remaining=$((30 - (SECONDS - audit_started)))
     [ "$audit_remaining" -gt 0 ] || break
-    if (ulimit -f 8192; exec "$timeout_binary" --signal=TERM --kill-after=2s "${audit_remaining}s" "$php" -d "memory_limit=$memory" "$scratch/audit.php" "$release" "$commit" "$persistent" "$app_dir" "$phase") </dev/null >"$scratch/output" 2>"$scratch/error"; then
+    if (ulimit -f 8192; exec "$timeout_binary" --signal=TERM --kill-after=2s "${audit_remaining}s" nohup "$php" -d "memory_limit=$memory" "$scratch/audit.php" "$release" "$commit" "$persistent" "$app_dir" "$phase") </dev/null >"$scratch/output" 2>"$scratch/error"; then
         audit_success=true
         break
     fi
