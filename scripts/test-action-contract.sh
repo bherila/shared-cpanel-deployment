@@ -129,5 +129,14 @@ check "finalized audits require successful finalization" grep -Fq "steps.atomic-
 post_finalize_validation=$(grep -nF 'verification-script post-finalize-script; do' "$action" | head -1 | cut -d: -f1)
 check "missing post-finalizer scripts fail before acquiring the production lock" test "$post_finalize_validation" -lt "$begin"
 check "post-finalizer diagnostics use the bounded retry runner" grep -Fq 'bash "$GITHUB_ACTION_PATH/scripts/run-post-finalize-hook.sh"' "$action"
+# 2026-10-27: a host-side SIGHUP killed an executed import mid-run while the SSH connection
+# was still alive, stranding a site after the risk boundary. Every deploy-path remote shell
+# starts with SIGHUP ignored, which its PHP children and the application's hooks inherit.
+# Orphan recovery is excluded: its remote script traps HUP to restore state on purpose.
+deploy_path_remote_files=("$action" "$here"/scripts/*.sh)
+check "deploy-path remote shells are started under nohup" bash -c '
+    sites=$(grep -h -c "\"nohup bash -s" "$@" | awk "{ s += \$1 } END { print s }")
+    [ "$sites" -ge 40 ] && ! grep -n "\"bash -s" "$@" | grep -v "/scripts/test-"
+' _ "${deploy_path_remote_files[@]}"
 echo "failures: $fails"
 exit "$fails"

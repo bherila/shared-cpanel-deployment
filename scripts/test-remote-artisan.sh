@@ -54,5 +54,22 @@ run .deployments/example-laravel/releases/release-1 "$php" 1G 'config:cache'; st
 check "commands run against a managed atomic candidate" \
     '[ "$status" -eq 0 ] && grep -Fqx -- "-d memory_limit=1G artisan config:cache" "$log"'
 
+# 2026-10-27: a host-side SIGHUP killed an executed import while the SSH session was still
+# alive. Started the way the action starts it, the command must survive and finish.
+hup_php="$scratch/hup-php"
+cat >"$hup_php" <<'PHP'
+#!/usr/bin/env bash
+kill -HUP $$
+printf '%s\n' "$*" >>"$PHP_LOG"
+PHP
+chmod +x "$hup_php"
+remote() { bash -c "$1 $(printf '%q ' example-laravel "$hup_php" 1G 'example:import --execute')" <"$script" >"$scratch/out" 2>&1; }
+: >"$log"
+remote 'bash -s --'; plain=$?
+check "the harness's PHP really dies of SIGHUP in a plain remote shell" '[ "$plain" -eq 129 ] && [ ! -s "$log" ]'
+remote 'nohup bash -s --'; status=$?
+check "a remote shell started under nohup lets the command survive SIGHUP" \
+    '[ "$status" -eq 0 ] && grep -Fqx -- "-d memory_limit=1G artisan example:import --execute" "$log"'
+
 echo "failures: $fails"
 exit "$fails"

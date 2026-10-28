@@ -15,7 +15,7 @@ case $command in
     'umask 022 && cat > '*) cat >"$PROBE_FIXTURE/remote-probe" ;;
     'rm -f '*) rm -f "$PROBE_FIXTURE/remote-probe"; touch "$PROBE_FIXTURE/cleaned" ;;
     # The origin fetch: run the real origin-fetch.sh from stdin, as the host would.
-    'bash -s -- '*) [[ ${PROBE_SSH_STALL:-0} != 1 ]] || { sleep 30; exit 1; }; printf '%s\n' "$command" >>"$PROBE_FIXTURE/origin-commands"; eval "set -- ${command#bash -s -- }"; exec bash -s -- "$@" ;;
+    'nohup bash -s -- '*) [[ ${PROBE_SSH_STALL:-0} != 1 ]] || { sleep 30; exit 1; }; printf '%s\n' "$command" >>"$PROBE_FIXTURE/origin-commands"; eval "set -- ${command#nohup bash -s -- }"; exec nohup bash -s -- "$@" ;;
     *) exit 99 ;;
 esac
 MOCK
@@ -148,7 +148,7 @@ command=${*: -1}
 case $command in
     'umask 022 && cat > '*) cat >"$PROBE_FIXTURE/remote-probe" ;;
     'rm -f '*) rm -f "$PROBE_FIXTURE/remote-probe"; touch "$PROBE_FIXTURE/cleaned" ;;
-    'bash -s -- '*) /usr/bin/sleep 30 ;;
+    'nohup bash -s -- '*) /usr/bin/sleep 30 ;;
     *) exit 99 ;;
 esac
 MOCK
@@ -165,7 +165,7 @@ command=${*: -1}
 case $command in
     'umask 022 && cat > '*) cat >"$PROBE_FIXTURE/remote-probe" ;;
     'rm -f '*) rm -f "$PROBE_FIXTURE/remote-probe"; touch "$PROBE_FIXTURE/cleaned" ;;
-    'bash -s -- '*) head -c 1048576 /dev/zero | tr '\0' x; printf '\nORIGIN-META 200|text/plain\n' ;;
+    'nohup bash -s -- '*) head -c 1048576 /dev/zero | tr '\0' x; printf '\nORIGIN-META 200|text/plain\n' ;;
     *) exit 99 ;;
 esac
 MOCK
@@ -180,7 +180,7 @@ command=${*: -1}
 case $command in
     'umask 022 && cat > '*) cat >"$PROBE_FIXTURE/remote-probe" ;;
     'rm -f '*) rm -f "$PROBE_FIXTURE/remote-probe"; touch "$PROBE_FIXTURE/cleaned" ;;
-    'bash -s -- '*)
+    'nohup bash -s -- '*)
         case ${PROBE_METADATA_KIND:-nul} in
             nul) printf '8.5|1024M|litespeed\nORIGIN-META 2\00000|text/plain\n' ;;
             secret) printf '8.5|1024M|litespeed\nORIGIN-META SECRET_TOKEN|text/plain\n' ;;
@@ -217,7 +217,7 @@ case $command in
     'rm -f '*)
         [[ ${PROBE_STAGE_STALL:-} != cleanup ]] || /usr/bin/sleep 30
         rm -f "$PROBE_FIXTURE/remote-probe"; touch "$PROBE_FIXTURE/cleaned" ;;
-    'bash -s -- '*) eval "set -- ${command#bash -s -- }"; exec bash -s -- "$@" ;;
+    'nohup bash -s -- '*) eval "set -- ${command#nohup bash -s -- }"; exec nohup bash -s -- "$@" ;;
     *) exit 99 ;;
 esac
 MOCK

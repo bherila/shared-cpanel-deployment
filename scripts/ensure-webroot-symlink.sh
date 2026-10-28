@@ -2,7 +2,7 @@
 #
 # Make ~/<link-name> a symlink to <app-dir>/public.
 #
-# Runs ON THE HOST: ssh <target> "bash -s -- <app-dir> <link-name>" < scripts/ensure-webroot-symlink.sh
+# Runs ON THE HOST: ssh <target> "nohup bash -s -- <app-dir> <link-name>" < scripts/ensure-webroot-symlink.sh
 #
 # A symlink is created, or repointed when it points elsewhere. A real file or directory at that name is
 # never removed: it may be another site's document root, or an AutoSSL challenge directory, so the

@@ -108,7 +108,7 @@ while IFS= read -r raw || [ -n "$raw" ]; do
 done <<<"${DEPLOY_EXCLUDES:-}"
 
 # shellcheck disable=SC2016,SC2029 # The heredoc expands on the host; the %q arguments deliberately on the runner.
-state=$(ssh "$target" "bash -s -- $(printf '%q ' "$dir" "$marker")" <<'REMOTE'
+state=$(ssh "$target" "nohup bash -s -- $(printf '%q ' "$dir" "$marker")" <<'REMOTE'
 d="$HOME/$1"
 if [ -L "$d" ]; then echo symlink
 elif [ ! -e "$d" ]; then echo absent

@@ -4,7 +4,7 @@
 #
 # Runs ON THE HOST, fed over SSH by the action:
 #
-#   ssh <target> "bash -s -- $(printf '%q ' <app-dir> <source> <op>...)" < scripts/configure-env.sh
+#   ssh <target> "nohup bash -s -- $(printf '%q ' <app-dir> <source> <op>...)" < scripts/configure-env.sh
 #
 #   <app-dir>  The application's directory under $HOME.
 #   <source>   A file under $HOME installed as .env (mode 600) first, or '' to keep the existing .env.

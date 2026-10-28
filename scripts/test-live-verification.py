@@ -105,7 +105,7 @@ esac
 command=${!#}
 printf '%s\\n' "$command" >>"$FIXTURE_TRACE"
 if [[ "$command" = *unmark-healthy* && "$FIXTURE_UNMARK_FAILURE" = 1 ]]; then exit 91; fi
-if [[ "$command" = 'bash -s -- '* && "$command" = *'/up '* ]]; then
+if [[ "$command" = 'nohup bash -s -- '* && "$command" = *'/up '* ]]; then
   if [[ "$FIXTURE_HEALTH_SSH_STALL" = 1 ]]; then /usr/bin/sleep 30; exit 1; fi
   if [[ "$FIXTURE_HEALTH_SSH_OVERSIZED" = 1 ]]; then exec head -c 1048576 /dev/zero; fi
   case "$FIXTURE_HEALTH_METADATA" in

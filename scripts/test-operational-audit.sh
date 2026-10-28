@@ -41,6 +41,8 @@ class Fixture {
             $path = getenv('APP_CONFIG_CACHE') ?: $this->getCachedConfigPath();
             if (file_exists($path)) { require $path; }
         }
+        // 2026-10-27: a host-side SIGHUP killed a deploy-time PHP process after the risk boundary.
+        if (getenv('HANGUP')) { exec('kill -HUP '.getmypid()); }
         if (getenv('NOISE')) { echo 'SECRET payload'; }
         if (getenv('ERROR')) { throw new \RuntimeException('SECRET credentials'); }
     }
@@ -87,6 +89,10 @@ done
 DRIVER=deferred FAILED_DRIVER=null audit >"$scratch/output"
 grep -Fq 'queue_applicability=no-persistent-queue pending_total=not-counted failed_applicability=disabled failed_total=not-counted' "$scratch/output"
 if DRIVER=background MISSING_TABLE=1 audit >"$scratch/output" 2>&1; then exit 1; fi
+# GNU timeout catches SIGHUP and its child starts with the default action, so the audit's PHP
+# must ignore SIGHUP itself rather than rely on the remote shell's nohup.
+HANGUP=1 audit >"$scratch/output"
+grep -Fq 'pending_total=7 failed_applicability=database failed_total=3' "$scratch/output"
 NOISE=1 audit >"$scratch/output"
 if grep -Fq SECRET "$scratch/output"; then exit 1; fi
 for failure in ERROR PENDING MISSING_TABLE; do
