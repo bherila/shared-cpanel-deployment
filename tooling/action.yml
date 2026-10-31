@@ -1,0 +1,21 @@
+name: Shared cPanel deployment tooling
+description: The path of this repository's scripts at the pinned commit, for jobs that run them outside the main action.
+outputs:
+  path:
+    description: Absolute path of the repository root at the pinned commit (contains action.yml and scripts/). Read-only; never write into it.
+    value: ${{ steps.locate.outputs.path }}
+runs:
+  using: composite
+  steps:
+    - id: locate
+      name: Locate the repository root
+      shell: bash
+      run: |
+        set -euo pipefail
+        root=$(cd "$GITHUB_ACTION_PATH/.." && pwd -P)
+        # Separate tests: in `a && b` under set -e, a failing `a` would not stop the step.
+        if [ ! -f "$root/action.yml" ] || [ ! -f "$root/scripts/configure-ssh.sh" ] || [ ! -d "$root/scripts" ]; then
+            echo "::error::$root does not contain action.yml and scripts/; refusing to publish it as the tooling path." >&2
+            exit 1
+        fi
+        echo "path=$root" >>"$GITHUB_OUTPUT"
