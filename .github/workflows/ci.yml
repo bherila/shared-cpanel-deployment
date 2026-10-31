@@ -135,14 +135,68 @@ jobs:
       - name: configure-ssh.sh real-transport harness
         run: bash scripts/test-configure-ssh.sh
 
+      - name: tooling and configure-ssh sub-action harness
+        run: python3 scripts/test-sub-actions.py
+
       - name: action.yml references only scripts that exist
         run: |
           set -euo pipefail
           status=0
           while IFS= read -r script; do
             [ -f "$script" ] || { echo "::error file=action.yml::$script does not exist"; status=1; }
-          done < <(grep -ho 'scripts/[A-Za-z0-9._-]*\.sh' action.yml recover-orphan/action.yml | sort -u)
+          done < <(grep -ho 'scripts/[A-Za-z0-9._-]*\.sh' action.yml recover-orphan/action.yml tooling/action.yml configure-ssh/action.yml | sort -u)
           exit "$status"
 
       - name: action.yml is valid YAML
-        run: ruby -ryaml -e 'YAML.load_file("action.yml"); YAML.load_file("recover-orphan/action.yml")'
+        run: ruby -ryaml -e 'YAML.load_file("action.yml"); YAML.load_file("recover-orphan/action.yml"); YAML.load_file("tooling/action.yml"); YAML.load_file("configure-ssh/action.yml")'
+
+  sub-actions:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - id: tooling
+        uses: ./tooling
+
+      - name: The tooling path holds the action and its scripts
+        env:
+          TOOLING_PATH: ${{ steps.tooling.outputs.path }}
+        run: |
+          set -euo pipefail
+          [ "$TOOLING_PATH" = "$(pwd -P)" ]
+          test -f "$TOOLING_PATH/action.yml"
+          test -f "$TOOLING_PATH/scripts/configure-ssh.sh"
+
+      - name: Generate a throwaway key and known_hosts line
+        run: |
+          set -euo pipefail
+          ssh-keygen -q -t ed25519 -N '' -f "$RUNNER_TEMP/subaction_key"
+          {
+            echo 'KEY<<EOF_KEY'
+            cat "$RUNNER_TEMP/subaction_key"
+            echo 'EOF_KEY'
+            echo "HOSTS=example.test $(cut -d' ' -f1,2 "$RUNNER_TEMP/subaction_key.pub")"
+          } >>"$GITHUB_ENV"
+
+      - id: ssh
+        uses: ./configure-ssh
+        with:
+          alias: subaction-pilot
+          host: example.test
+          username: cpuser
+          private-key: ${{ env.KEY }}
+          known-hosts: ${{ env.HOSTS }}
+
+      - name: The alias is configured and resolves without connecting
+        env:
+          TARGET: ${{ steps.ssh.outputs.target }}
+        run: |
+          set -euo pipefail
+          [ "$TARGET" = subaction-pilot ]
+          grep -qx 'Host subaction-pilot' ~/.ssh/config
+          resolved=$(ssh -G "$TARGET")
+          grep -qx 'hostname example.test' <<<"$resolved"
+          grep -qx 'user cpuser' <<<"$resolved"
+          grep -qx 'stricthostkeychecking true' <<<"$resolved"

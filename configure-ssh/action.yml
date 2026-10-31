@@ -1,0 +1,35 @@
+name: Configure SSH for a cPanel host
+description: Write the same pinned, multiplexed SSH alias the main action uses, for diagnostic or pilot jobs that connect outside the main action.
+inputs:
+  alias:
+    description: SSH alias to write; must not already exist in ~/.ssh/config. Also returned as the target output.
+    required: true
+  host:
+    description: The cPanel host name.
+    required: true
+  username:
+    description: The cPanel account user.
+    required: true
+  private-key:
+    description: Deploy private key (pass a secret).
+    required: true
+  known-hosts:
+    description: Pinned known_hosts lines for the host. Host keys are never trusted on first use.
+    required: true
+outputs:
+  target:
+    description: The SSH alias to pass to ssh and rsync.
+    value: ${{ steps.ssh.outputs.target }}
+runs:
+  using: composite
+  steps:
+    - id: ssh
+      name: Configure SSH
+      shell: bash
+      env:
+        SSH_ALIAS: ${{ inputs.alias }}
+        SSH_HOST_NAME: ${{ inputs.host }}
+        SSH_USER_NAME: ${{ inputs.username }}
+        SSH_PRIVATE_KEY: ${{ inputs.private-key }}
+        SSH_KNOWN_HOSTS: ${{ inputs.known-hosts }}
+      run: bash "$GITHUB_ACTION_PATH/../scripts/configure-ssh.sh"

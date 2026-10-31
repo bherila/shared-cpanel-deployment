@@ -457,6 +457,46 @@ The old checklist remains relevant for the explicit in-place escape hatch:
   tagged line; `~/.crontab-backups/` has the previous crontab.
 - If an existing deploy ran `migrate` without `--force`, check `APP_ENV` first.
 
+## Running the scripts outside the main action
+
+Diagnostic or pilot jobs sometimes need this repository's scripts (`scripts/configure-ssh.sh`,
+`scripts/operational-audit.sh`) or its files (tests that read `action.yml`). **Do not check this
+repository out separately.** Dependabot updates the commit SHA in a `uses:` line but cannot update a
+checkout `ref:`, so every bump leaves the checkout on the old commit and your diagnostics or tests
+quietly run different tooling from what you deploy with. Use a sub-action instead: GitHub downloads the
+whole repository at the pinned SHA, and Dependabot keeps that pin current like any other `uses:`.
+
+`tooling` returns the absolute repository root at the pinned commit (it contains `action.yml` and
+`scripts/`) and fails if that path does not:
+
+```yaml
+- id: tooling
+  uses: bherila/shared-cpanel-deployment/tooling@<sha> # vX.Y.Z
+- run: bash "${{ steps.tooling.outputs.path }}/scripts/operational-audit.sh" ...
+```
+
+The path is read-only by convention; never write into it.
+
+`configure-ssh` runs `scripts/configure-ssh.sh` and leaves exactly the SSH alias, key, pinned
+`known_hosts` and multiplexing settings the main action writes, so a job connects identically. All five
+inputs are required and are passed through `env:`, never interpolated into a shell command. The alias
+must not already exist in `~/.ssh/config`. The `target` output is the alias:
+
+```yaml
+- id: ssh
+  uses: bherila/shared-cpanel-deployment/configure-ssh@<sha> # vX.Y.Z
+  with:
+    alias: pilot-deploy
+    host: ${{ secrets.SSH_HOST }}
+    username: ${{ secrets.SSH_USERNAME }}
+    private-key: ${{ secrets.SSH_PRIVATE_KEY }}
+    known-hosts: ${{ secrets.SSH_KNOWN_HOSTS }}
+- run: ssh "${{ steps.ssh.outputs.target }}" true
+```
+
+To migrate, delete the second `actions/checkout` (with `repository:` and `ref:`) and replace its uses
+with the two sub-actions above. Pin both with the same SHA as the main action.
+
 ## Optional operational audit and next release adoption
 
 Enable `operational-audit: 'true'` on atomic deployments after pinning the next reviewed shared-action
@@ -554,6 +594,7 @@ bash scripts/test-remote-artisan.sh
 bash scripts/test-operational-audit.sh
 bash scripts/test-ensure-passport-keys.sh
 bash scripts/test-install-branding.sh
+python3 scripts/test-sub-actions.py
 ```
 
 `bash scripts/test-real-laravel-passport.sh '^13.0'` proves the Passport check against a real
